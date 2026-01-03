@@ -6,7 +6,7 @@ Deploy [OpenEMR](https://www.open-emr.org/) 7.0.4 - the most popular open-source
 
 ## Overview
 
-This project provides a production-ready container image and deployment script for running OpenEMR on OpenShift, including the free [Developer Sandbox](https://developers.redhat.com/developer-sandbox).
+This project provides a production-ready container image and deployment script for running OpenEMR on OpenShift, including the free [Developer Sandbox](https://developers.redhat.com/developer-sandbox), where you can test drive the latest version of OpenShift!
 
 **Stack:**
 - **OpenEMR 7.0.4** - Electronic Health Records system
@@ -28,7 +28,7 @@ This project provides a production-ready container image and deployment script f
 | **Resource Management** | CPU/memory limits prevent runaway processes |
 | **Easy Scaling** | Scale replicas with a single command (with shared storage) |
 | **Built-in Monitoring** | OpenShift console provides metrics, logs, and topology visualization |
-| **Developer Sandbox** | Free 30-day environment for testing - no credit card required |
+| **Developer Sandbox** | Free 30-day environment for testing the latest OpenShift. The sandbox is NOT for production deployments!|
 
 ## Prerequisites
 
@@ -329,16 +329,15 @@ Contributions welcome! Please open issues or pull requests for:
 
 ## License
 
-This deployment configuration is provided under the MIT License.
-
 OpenEMR itself is licensed under [GPL-3.0](https://github.com/openemr/openemr/blob/master/LICENSE).
 
 ## Acknowledgments
 
 - [OpenEMR Project](https://www.open-emr.org/) - The open-source EHR community
-- [Red Hat](https://www.redhat.com/) - OpenShift platform
-- Claude (Anthropic) - AI-assisted debugging and documentation
+- [Red Hat](https://www.redhat.com/) - for OpenShift and the Developer Sandbox
+- Claude (Anthropic) Opus 4.5 - AI-assisted debugging and documentation
+
 
 ---
 
-**Note:** This project containerized OpenEMR for OpenShift in 2025. A similar effort was the author's Master's thesis in 2020 targeting OpenShift 3.11 - what took months then now takes hours with modern tooling and AI assistance!
+**Note:** This project containerized OpenEMR for OpenShift in 2025. Pull requests for this deployment are welcome!
