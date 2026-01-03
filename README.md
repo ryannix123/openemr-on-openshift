@@ -1,488 +1,344 @@
-# OpenEMR on OpenShift Developer Sandbox
+# OpenEMR on OpenShift
 
-Production-ready deployment of OpenEMR 7.0.5 on Red Hat OpenShift Developer Sandbox using a custom CentOS 9 Stream container with PHP 8.4 from Remi's repository.
+Deploy [OpenEMR](https://www.open-emr.org/) 7.0.4 - the most popular open-source Electronic Health Records (EHR) system - on Red Hat OpenShift with a single command.
+
+![OpenEMR Login](https://www.open-emr.org/wiki/images/c/c8/OpenEMR_Logo.png)
 
 ## Overview
 
-This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift Developer Sandbox. It includes:
+This project provides a production-ready container image and deployment script for running OpenEMR on OpenShift, including the free [Developer Sandbox](https://developers.redhat.com/developer-sandbox).
 
-- **Custom OpenEMR Container**: Built on CentOS 9 Stream with Remi's PHP 8.4
-- **Redis Session Storage**: Redis 8 Alpine for improved performance and scalability
-- **MariaDB 11.8**: Latest Fedora MariaDB for robust database backend
-- **Developer Sandbox Ready**: Optimized for Developer Sandbox storage and resource constraints
-- **OpenShift Native**: Designed for OpenShift SCCs and security constraints
-- **Production Ready**: Includes health checks, resource limits, and monitoring
-- **HIPAA Considerations**: Encrypted transport, audit logging capabilities
+**Stack:**
+- **OpenEMR 7.0.4** - Electronic Health Records system
+- **CentOS 9 Stream** - Base container image
+- **PHP 8.4** - Via Remi repository
+- **nginx + PHP-FPM** - Web server (supervisord managed)
+- **MariaDB 11.8** - Database
+- **Redis 8** - Session caching
 
-**Note**: This deployment is configured for OpenShift Developer Sandbox which uses AWS EBS storage (ReadWriteOnce only). OpenEMR runs as a single replica, suitable for development, demo, and small practice environments.
+## Benefits of Running on OpenShift
 
-## Why OpenEMR?
+| Benefit | Description |
+|---------|-------------|
+| **Enterprise Security** | Containers run as non-root with arbitrary UIDs, SecurityContext constraints, and network policies |
+| **Automated TLS** | Routes automatically provide HTTPS with valid certificates |
+| **Self-Healing** | Failed pods are automatically restarted; health checks ensure availability |
+| **Declarative Configuration** | Infrastructure as code - entire deployment defined in scripts |
+| **Persistent Storage** | Managed persistent volumes for database and documents |
+| **Resource Management** | CPU/memory limits prevent runaway processes |
+| **Easy Scaling** | Scale replicas with a single command (with shared storage) |
+| **Built-in Monitoring** | OpenShift console provides metrics, logs, and topology visualization |
+| **Developer Sandbox** | Free 30-day environment for testing - no credit card required |
 
-OpenEMR stands as the world's most popular open-source electronic health records and medical practice management solution, and for good reason:
+## Prerequisites
 
-**Certified Excellence**: OpenEMR 7.0 achieved [ONC 2015 Cures Update Certification](https://chpl.healthit.gov/#/listing/10938), meeting rigorous U.S. federal standards for interoperability, security, and clinical quality measures. This certification enables providers to participate in Quality Payment Programs (QPP/MIPS) and demonstrates commitment to healthcare standards.
+### 1. OpenShift CLI (oc)
 
-**Global Impact at Scale**: With over 100,000 medical providers serving more than 200 million patients across 100+ countries, OpenEMR has proven its reliability in diverse healthcare settings. The software is translated into 36 languages and downloaded 2,500+ times monthly, reflecting its worldwide trust and adoption.
+Download the `oc` CLI tool for your platform:
 
-**True Interoperability**: OpenEMR implements modern healthcare standards including FHIR APIs, SMART on FHIR, OAuth2, CCDA, Direct messaging, and Clinical Quality Measures (eCQMs). This extensive interoperability enables seamless integration with labs, hospitals, health information exchanges, and third-party applications—eliminating data silos and vendor lock-in.
+**macOS:**
+```bash
+brew install openshift-cli
+```
 
-**Cost-Effective Freedom**: As genuinely free and open-source software (no licensing fees, ever), OpenEMR provides an economically sustainable alternative to proprietary systems. Healthcare organizations maintain complete control over their data and infrastructure, with the freedom to customize, extend, or migrate without vendor restrictions or hidden costs.
+**Linux:**
+```bash
+curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+tar xvf openshift-client-linux.tar.gz
+sudo mv oc /usr/local/bin/
+```
 
-**Community-Driven Innovation**: Developed since 2002 by physicians for physicians, OpenEMR benefits from contributions by hundreds of developers and support from 40+ professional companies. This vibrant ecosystem ensures continuous improvement, long-term sustainability, and responsive support options ranging from community forums to professional vendors.
+**Windows:**
+Download from [OpenShift Mirror](https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/) and add to PATH.
 
-**Healthcare Without Boundaries**: OpenEMR's mission ensures that quality healthcare technology remains accessible regardless of practice size, geographic location, or economic resources. This democratization of healthcare IT particularly benefits underserved communities, small practices, and international healthcare providers who were left behind by commercial EHR systems.
+Verify installation:
+```bash
+oc version
+```
 
-Whether you're a solo practitioner, a community health center, or a large healthcare system, OpenEMR provides enterprise-grade capabilities without enterprise-grade costs—proving that world-class healthcare software should be accessible to all.
+### 2. OpenShift Environment
+
+**Option A: Developer Sandbox (Free)**
+
+1. Sign up at [developers.redhat.com/developer-sandbox](https://developers.redhat.com/developer-sandbox)
+2. Click "Start your sandbox"
+3. Log in with your Red Hat account
+4. Click the "Copy login command" link in the OpenShift console
+5. Run the `oc login` command in your terminal
+
+**Option B: Your Own Cluster**
+
+Log in to your cluster:
+```bash
+oc login --server=https://your-cluster-api:6443
+```
+
+### 3. Container Tools (for building)
+
+If you want to build the image yourself:
+- [Podman](https://podman.io/getting-started/installation) (recommended) or Docker
+- Account on [Quay.io](https://quay.io) or another container registry
+
+## Quick Start
+
+### Deploy with Pre-built Image
+
+```bash
+# Clone or download the deployment script
+chmod +x deploy-openemr.sh
+
+# Deploy OpenEMR
+./deploy-openemr.sh --deploy
+```
+
+The script will:
+1. Detect your current OpenShift project
+2. Deploy MariaDB with persistent storage
+3. Deploy Redis for session caching
+4. Deploy OpenEMR with auto-configuration
+5. Create a TLS-secured route
+6. Display login credentials
+
+### Access OpenEMR
+
+After deployment completes, access OpenEMR at the URL shown in the output:
+```
+https://openemr-<namespace>.apps.<cluster-domain>/
+```
+
+Login with the credentials displayed (also saved to `openemr-credentials.txt`).
+
+## Building the Container Image
+
+To build and push your own image:
+
+```bash
+# Build for linux/amd64 (required for OpenShift)
+podman build --platform linux/amd64 -t quay.io/<your-username>/openemr-openshift:7.0.4 -f Containerfile .
+
+# Push to registry
+podman push quay.io/<your-username>/openemr-openshift:7.0.4
+```
+
+Update `OPENEMR_IMAGE` in `deploy-openemr.sh` to use your image.
+
+## Deployment Commands
+
+```bash
+# Deploy OpenEMR
+./deploy-openemr.sh --deploy
+
+# Check status
+./deploy-openemr.sh --status
+
+# Clean up (preserves PVCs)
+./deploy-openemr.sh --cleanup
+
+# Full cleanup including data
+./deploy-openemr.sh --cleanup
+oc delete pvc openemr-documents mariadb-data
+```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│          OpenShift Route (HTTPS)            │
-│    openemr-openemr.apps.sandbox.xxx.xxx     │
-└─────────────────┬───────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────┐
-│         OpenEMR Service (ClusterIP)         │
-│                Port 8080                    │
-└─────────────────┬───────────────────────────┘
-                  │
-        ┌─────────▼──────────┐
-        │  OpenEMR Pod       │
-        │  (single replica)  │
-        │  nginx + PHP-FPM   │
-        └────┬───────────┬───┘
-             │           │
-    ┌────────▼───┐  ┌───▼──────────┐
-    │ Redis Svc  │  │ MariaDB Svc  │
-    │ Port 6379  │  │ Port 3306    │
-    └────┬───────┘  └───┬──────────┘
-         │              │
-    ┌────▼────────┐ ┌──▼───────────┐
-    │ Redis Pod   │ │ MariaDB      │
-    │ (sessions)  │ │ StatefulSet  │
-    └────┬────────┘ └──┬───────────┘
-         │             │
-    ┌────▼────────┐ ┌─▼────────────┐
-    │ Redis PVC   │ │ Database PVC │
-    │ (RWO - 1Gi) │ │ (RWO - 5Gi)  │
-    └─────────────┘ └──────────────┘
-         
-        ┌─────────────────┐
-        │  Documents PVC  │
-        │  (RWO - 10Gi)   │
-        │  gp3 storage    │
-        └─────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                     OpenShift Cluster                        │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │                    Project/Namespace                 │    │
+│  │                                                      │    │
+│  │  ┌──────────┐    ┌──────────┐    ┌──────────┐      │    │
+│  │  │  Route   │───▶│ Service  │───▶│ OpenEMR  │      │    │
+│  │  │  (TLS)   │    │  :8080   │    │   Pod    │      │    │
+│  │  └──────────┘    └──────────┘    └────┬─────┘      │    │
+│  │                                       │             │    │
+│  │                    ┌──────────────────┼──────┐     │    │
+│  │                    │                  │      │     │    │
+│  │                    ▼                  ▼      │     │    │
+│  │              ┌──────────┐      ┌──────────┐  │     │    │
+│  │              │ MariaDB  │      │  Redis   │  │     │    │
+│  │              │   Pod    │      │   Pod    │  │     │    │
+│  │              └────┬─────┘      └──────────┘  │     │    │
+│  │                   │                          │     │    │
+│  │                   ▼                          ▼     │    │
+│  │              ┌──────────┐           ┌──────────┐  │    │
+│  │              │   PVC    │           │   PVC    │  │    │
+│  │              │ (5Gi DB) │           │ (10Gi)   │  │    │
+│  │              └──────────┘           └──────────┘  │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Developer Sandbox Constraints:**
-- AWS EBS storage (gp3) provides ReadWriteOnce (RWO) volumes only
-- Single OpenEMR replica due to RWO storage limitation
-- Resource quotas: ~768Mi RAM and ~500m CPU per container
-- Total storage: 16Gi (5Gi database + 10Gi documents + 1Gi Redis)
-- Redis 8 Alpine for PHP session storage
+## Technical Challenges Solved
 
-## Components
+Building OpenEMR for OpenShift required solving several non-obvious issues:
 
-### OpenEMR Container
-- **Base**: CentOS 9 Stream
-- **PHP**: 8.4 (from Remi's repository)
-- **Web Server**: nginx + PHP-FPM (via supervisord)
-- **OpenEMR**: 7.0.5
-- **Session Storage**: Redis (tcp://redis:6379)
-- **Features**:
-  - OpenShift SCC compliant (runs as arbitrary UID)
-  - Health check endpoints
-  - OPcache enabled for performance
-  - All required PHP extensions
-  - Redis session handler for scalability
+### 1. InstallerAuto.php Parameter Naming
+**Problem:** The auto-installer uses `server=` for the database host, not `host=` as you might expect.
 
-### Redis Cache
-- **Image**: Redis 8 Alpine (docker.io/redis:8-alpine)
-- **Storage**: 1Gi RWO persistent volume (gp3)
-- **Purpose**: PHP session storage
-- **Configuration**: 
-  - maxmemory: 256MB with LRU eviction policy
-  - Persistence: AOF (Append Only File)
-  - Non-root execution (OpenShift restricted SCC)
-
-### Database
-- **Image**: Fedora MariaDB 11.8 (quay.io/fedora/mariadb-118)
-- **Storage**: 5Gi RWO persistent volume (gp3)
-- **Credentials**: Auto-generated secure passwords
-
-### Storage
-- **Documents**: 10Gi RWO volume (for patient documents, images) - gp3 EBS
-- **Database**: 5Gi RWO volume (for MariaDB data) - gp3 EBS
-- **Redis**: 1Gi RWO volume (for session persistence) - gp3 EBS
-- **Storage Class**: `gp3` (AWS EBS CSI driver, default in Developer Sandbox)
-- **Total**: 16Gi
-
-## Prerequisites
-
-- Red Hat OpenShift Developer Sandbox account ([Get free access](https://developers.redhat.com/developer-sandbox))
-- `oc` CLI tool installed and configured
-- Access to Quay.io for pulling container images (or build your own)
-- Basic understanding of Kubernetes/OpenShift concepts
-
-**Developer Sandbox Limitations to be aware of:**
-- Projects expire after 30 days of inactivity
-- Storage limited to ~40GB total per namespace
-- Resource quotas: Limited CPU/memory per namespace
-- No cluster-admin access
-- Single replica deployments recommended for persistent storage
-
-## Quick Start
-
-### 1. Clone the Repository
-
+**Solution:** Use the correct parameter name:
 ```bash
-git clone https://github.com/ryannix123/openemr-openshift.git
-cd openemr-openshift
+php -f InstallerAuto.php server=mariadb  # ✓ Correct
+php -f InstallerAuto.php host=mariadb    # ✗ Silently fails
 ```
 
-### 2. Build the Container (Optional)
+### 2. OPcache Caching Stale Configuration
+**Problem:** PHP's OPcache caches bytecode, so updates to `sqlconf.php` weren't reflected until cache expired.
 
-If you want to build your own container:
-
+**Solution:** Fresh deployments avoid this issue. For debugging, invalidate cache:
 ```bash
-# Build the container
-podman build -t quay.io/ryan_nix/openemr-openshift:7.0.5 .
-
-# Push to Quay.io
-podman login quay.io
-podman push quay.io/ryan_nix/openemr-openshift:7.0.5
+php -r "opcache_invalidate('/path/to/sqlconf.php', true);"
 ```
 
-Or use the pre-built image: `quay.io/ryan_nix/openemr-openshift:7.0.5`
+### 3. PVC Mount Overwrites Crypto Directory
+**Problem:** OpenEMR needs `/sites/default/documents/logs_and_misc/methods/` for encryption keys, but mounting a PVC on `/documents` overwrites it.
 
-### 3. Configure the Deployment (Optional)
-
-The script is pre-configured for Developer Sandbox with sensible defaults:
-- Storage: `gp3` (default Developer Sandbox storage class)
-- Database: 5Gi
-- Documents: 10Gi
-
-You can optionally adjust these in `deploy-openemr.sh` if needed, but defaults work well for most cases.
-
-### 4. Login to OpenShift Developer Sandbox
-
+**Solution:** Create the directory at runtime after pod starts:
 ```bash
-# Get your login command from the Developer Sandbox web console
-oc login --token=sha256~xxxxx --server=https://api.sandbox.xxxxx.openshiftapps.com:6443
+mkdir -p /var/www/html/openemr/sites/default/documents/logs_and_misc/methods
+chmod -R 770 /var/www/html/openemr/sites/default/documents/logs_and_misc
 ```
 
-### 5. Deploy OpenEMR
+### 4. Password Special Characters
+**Problem:** Base64-encoded passwords contain `/`, `+`, `=` which break shell argument parsing.
 
+**Solution:** Use hex-encoded passwords:
 ```bash
-chmod +x deploy-openemr.sh
-./deploy-openemr.sh
+openssl rand -hex 24  # ✓ Only 0-9, a-f characters
+openssl rand -base64 24  # ✗ Contains special characters
 ```
 
-The script will:
-1. Create the OpenShift project
-2. Deploy MariaDB with persistent storage
-3. Deploy OpenEMR application
-4. Create routes for external access
-5. Display access credentials
+### 5. Node.js Version for Frontend Build
+**Problem:** OpenEMR's npm build requires Node.js 18+, but CentOS 9 ships with Node.js 16.
 
-### 6. Complete OpenEMR Setup
+**Solution:** Install Node.js 20 from NodeSource:
+```dockerfile
+RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - \
+    && dnf install -y nodejs
+```
 
-1. Navigate to the URL provided in the deployment summary
-2. Follow the OpenEMR setup wizard
-3. Use the database credentials from `openemr-credentials.txt`
+### 6. OpenShift Arbitrary User IDs
+**Problem:** OpenShift runs containers with random UIDs for security, breaking file permissions.
+
+**Solution:** Ensure group 0 (root) has same permissions as owner:
+```dockerfile
+RUN chgrp -R 0 /var/www/html && chmod -R g=u /var/www/html
+```
 
 ## Configuration
 
-### Storage Classes
+### Environment Variables
 
-The deployment uses **AWS EBS gp3** storage (default in Developer Sandbox):
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MYSQL_HOST` | `mariadb` | Database hostname |
+| `MYSQL_PORT` | `3306` | Database port |
+| `MYSQL_DATABASE` | `openemr` | Database name |
+| `MYSQL_USER` | `openemr` | Database username |
+| `MYSQL_PASS` | (generated) | Database password |
+| `OE_USER` | `admin` | OpenEMR admin username |
+| `OE_PASS` | (generated) | OpenEMR admin password |
 
-- **Access Mode**: ReadWriteOnce (RWO) only
-- **Storage Class**: `gp3` (default)
-- **Available**: gp2, gp2-csi, gp3, gp3-csi (all RWO)
-- **Not Available**: ReadWriteMany (RWX) storage
+### Storage
 
-**Note**: Due to RWO storage limitations, OpenEMR runs as a single replica. This is suitable for development, testing, and small practice environments.
-
-### Scaling
-
-**Important**: Scaling to multiple replicas is not supported with RWO storage. If you need high availability:
-
-1. Deploy on a full OpenShift cluster with RWX storage (e.g., ODF CephFS)
-2. Update storage class to RWX-capable storage
-3. Change `ReadWriteOnce` to `ReadWriteMany` in documents PVC
-4. Then scale: `oc scale deployment/openemr --replicas=3 -n openemr`
+| PVC | Size | Purpose |
+|-----|------|---------|
+| `mariadb-data` | 5Gi | Database files |
+| `openemr-documents` | 10Gi | Patient documents, logs, configs |
 
 ### Resource Limits
 
-Current resource allocations (optimized for Developer Sandbox):
-
-**OpenEMR Pod:**
-- Requests: 384Mi RAM, 200m CPU
-- Limits: 768Mi RAM, 500m CPU
-
-**MariaDB:**
-- Requests: 512Mi RAM, 200m CPU
-- Limits: 1Gi RAM, 500m CPU
-
-**Redis:**
-- Requests: 128Mi RAM, 100m CPU
-- Limits: 256Mi RAM, 250m CPU
-
-**Total Namespace Usage:**
-- RAM: ~1Gi requests, ~2Gi limits
-- CPU: ~500m requests, ~1250m limits
-- Storage: 16Gi (5Gi DB + 10Gi documents + 1Gi Redis)
-
-These values fit within typical Developer Sandbox namespace quotas.
-
-## Container Details
-
-### PHP Configuration
-
-The container includes these PHP settings optimized for OpenEMR:
-
-```ini
-upload_max_filesize = 128M
-post_max_size = 128M
-memory_limit = 512M
-max_execution_time = 300
-
-# Session storage via Redis
-session.save_handler = redis
-session.save_path = "tcp://redis:6379"
-```
-
-### PHP Extensions
-
-All required OpenEMR extensions are included:
-- php-mysqlnd (database)
-- php-gd (image processing)
-- php-xml (XML processing)
-- php-mbstring (multi-byte strings)
-- php-zip (compression)
-- php-curl (HTTP requests)
-- php-opcache (performance)
-- php-ldap (LDAP authentication)
-- php-soap (web services)
-- php-imap (email)
-- php-sodium (encryption)
-- php-pecl-redis5 (session storage)
-- php-ldap (LDAP authentication)
-- php-soap (web services)
-- php-imap (email)
-- php-sodium (encryption)
-
-### Health Checks
-
-The container exposes these endpoints:
-
-- `/health` - General health check (returns 200)
-- `/fpm-status` - PHP-FPM status page
+| Component | CPU Request | CPU Limit | Memory Request | Memory Limit |
+|-----------|-------------|-----------|----------------|--------------|
+| OpenEMR | 200m | 500m | 384Mi | 768Mi |
+| MariaDB | 200m | 500m | 512Mi | 1Gi |
+| Redis | 100m | 200m | 128Mi | 256Mi |
 
 ## Troubleshooting
 
-### View Logs
-
+### Check Pod Status
 ```bash
-# OpenEMR application logs
-oc logs -f deployment/openemr -n openemr
+oc get pods
+oc describe pod <pod-name>
+```
 
-# MariaDB logs
-oc logs -f statefulset/mariadb -n openemr
+### View Logs
+```bash
+# OpenEMR logs
+oc logs deployment/openemr
 
-# Get all pods
-oc get pods -n openemr
+# Database logs
+oc logs statefulset/mariadb
+
+# Follow logs in real-time
+oc logs -f deployment/openemr
+```
+
+### Access Pod Shell
+```bash
+oc exec -it deployment/openemr -- bash
 ```
 
 ### Common Issues
 
-**Pod not starting:**
+**500 Error on Login Page**
 ```bash
-# Describe the pod for events
-oc describe pod <pod-name> -n openemr
-
-# Check for image pull errors
-oc get events -n openemr --sort-by='.lastTimestamp'
+# Create crypto directory
+oc exec deployment/openemr -- mkdir -p /var/www/html/openemr/sites/default/documents/logs_and_misc/methods
+oc exec deployment/openemr -- chmod -R 770 /var/www/html/openemr/sites/default/documents/logs_and_misc
 ```
 
-**Storage issues:**
-```bash
-# Check PVC status
-oc get pvc -n openemr
-
-# Describe PVC for binding issues
-oc describe pvc <pvc-name> -n openemr
-```
-
-**Database connection errors:**
+**Database Connection Failed**
 ```bash
 # Verify MariaDB is running
-oc get pods -l app=mariadb -n openemr
+oc get pods -l app=mariadb
 
-# Test database connectivity from OpenEMR pod
-oc exec -it deployment/openemr -n openemr -- bash
-# Inside the pod:
-php -r "mysqli_connect('mariadb', 'openemr', 'password', 'openemr') or die(mysqli_connect_error());"
+# Test connection from OpenEMR pod
+oc exec deployment/openemr -- php -r "new mysqli('mariadb', 'openemr', \$_ENV['MYSQL_PASS'], 'openemr') or die('Failed');"
 ```
 
-### Reset Deployment
-
-To completely remove and redeploy:
-
+**Setup Page Appears Instead of Login**
 ```bash
-oc delete project openemr
-# Wait for project to fully delete, then re-run:
-./deploy-openemr.sh
+# Check if configuration completed
+oc exec deployment/openemr -- grep "config = " /var/www/html/openemr/sites/default/sqlconf.php
+# Should show: $config = 1
 ```
 
-## Security Considerations
+## Developer Sandbox Limitations
 
-### HIPAA Compliance
+The free Developer Sandbox has some constraints:
+- **Storage:** RWO (ReadWriteOnce) only - single replica deployments
+- **Resources:** Limited CPU and memory quotas
+- **Duration:** 30-day sandbox, renewable
+- **Idle timeout:** Pods sleep after 12 hours of inactivity
 
-This deployment includes several security features for healthcare environments:
-
-1. **Encryption in Transit**: TLS/HTTPS via OpenShift routes
-2. **Encryption at Rest**: Enable encrypted storage classes
-3. **Access Controls**: Leverage OpenShift RBAC
-4. **Audit Logging**: OpenEMR's built-in audit log
-5. **Network Policies**: Implement NetworkPolicy objects
-
-### Recommended Enhancements
-
-For production healthcare deployments:
-
-1. **Enable Encryption at Rest**:
-   ```bash
-   # Use encrypted storage classes
-   STORAGE_CLASS="ocs-storagecluster-ceph-rbd-encrypted"
-   ```
-
-2. **Implement Network Policies**:
-   ```yaml
-   # Deny all traffic except necessary connections
-   kind: NetworkPolicy
-   apiVersion: networking.k8s.io/v1
-   metadata:
-     name: openemr-netpol
-   spec:
-     podSelector:
-       matchLabels:
-         app: openemr
-     policyTypes:
-     - Ingress
-     - Egress
-     ingress:
-     - from:
-       - namespaceSelector:
-           matchLabels:
-             name: openshift-ingress
-     egress:
-     - to:
-       - podSelector:
-           matchLabels:
-             app: mariadb
-       ports:
-       - protocol: TCP
-         port: 3306
-   ```
-
-3. **Configure Backup Strategy**:
-   ```bash
-   # Use OADP or Velero for backup/restore
-   # Schedule regular database backups
-   ```
-
-4. **Enable Pod Security Standards**:
-   ```bash
-   oc label namespace openemr \
-     pod-security.kubernetes.io/enforce=restricted \
-     pod-security.kubernetes.io/warn=restricted
-   ```
-
-## Maintenance
-
-### Backup
-
-**Database backup:**
-```bash
-# Create database dump
-oc exec -it statefulset/mariadb -n openemr -- \
-  mysqldump -u root -p"$DB_ROOT_PASSWORD" openemr > openemr-backup-$(date +%Y%m%d).sql
-```
-
-**Document backup:**
-```bash
-# Backup documents PVC
-oc rsync openemr-pod:/var/www/html/openemr/sites/default/documents ./backup/documents/
-```
-
-### Updates
-
-**Update OpenEMR container:**
-```bash
-# Build new version
-podman build -t quay.io/ryan_nix/openemr-openshift:7.0.6 .
-podman push quay.io/ryan_nix/openemr-openshift:7.0.6
-
-# Update deployment
-oc set image deployment/openemr \
-  openemr=quay.io/ryan_nix/openemr-openshift:7.0.6 -n openemr
-```
-
-## Project Structure
-
-```
-openemr-openshift/
-├── Containerfile              # Container build instructions
-├── deploy-openemr.sh          # Automated deployment script
-├── README.md                  # This file
-├── .containerignore           # Files to ignore during build
-└── manifests/                 # (Optional) Individual YAML files
-    ├── deployment.yaml
-    ├── service.yaml
-    ├── route.yaml
-    └── mariadb/
-        ├── statefulset.yaml
-        └── service.yaml
-```
+For production deployments, use a full OpenShift cluster with:
+- RWX storage for multi-replica scaling
+- Redis persistence enabled
+- Regular backups configured
+- Custom domain with proper certificates
 
 ## Contributing
 
-Contributions are welcome! Areas for improvement:
-
-- [ ] Helm chart version
-- [ ] GitOps/ArgoCD manifests
-- [ ] Automated database migrations
-- [ ] Prometheus metrics exporters
-- [ ] Custom Operator
-- [ ] Multi-tenancy support
-
-## Resources
-
-- [OpenEMR Official Site](https://www.open-emr.org/)
-- [OpenEMR Documentation](https://www.open-emr.org/wiki/index.php/OpenEMR_Wiki_Home_Page)
-- [Red Hat OpenShift Documentation](https://docs.openshift.com/)
-- [OpenShift Data Foundation](https://www.redhat.com/en/technologies/cloud-computing/openshift-data-foundation)
+Contributions welcome! Please open issues or pull requests for:
+- Bug fixes
+- Documentation improvements
+- Support for newer OpenEMR versions
+- Helm chart creation
+- Operator development
 
 ## License
 
-This project follows OpenEMR's licensing. OpenEMR is licensed under GPL v3.
+This deployment configuration is provided under the MIT License.
 
-## Author
-
-**Ryan Nix**
-- Senior Solutions Architect, Red Hat
-- GitHub: [@ryannix123](https://github.com/ryannix123)
-- Quay.io: [ryan_nix](https://quay.io/user/ryan_nix)
+OpenEMR itself is licensed under [GPL-3.0](https://github.com/openemr/openemr/blob/master/LICENSE).
 
 ## Acknowledgments
 
-- OpenEMR development team
-- Red Hat OpenShift team
-- Based on the Nextcloud on OpenShift pattern
+- [OpenEMR Project](https://www.open-emr.org/) - The open-source EHR community
+- [Red Hat](https://www.redhat.com/) - OpenShift platform
+- Claude (Anthropic) - AI-assisted debugging and documentation
 
 ---
 
-**Note**: This is designed for healthcare environments. Ensure compliance with HIPAA, HITECH, and other applicable regulations in your jurisdiction before deploying with real patient data.
+**Note:** This project containerized OpenEMR for OpenShift in 2025. A similar effort was the author's Master's thesis in 2020 targeting OpenShift 3.11 - what took months then now takes hours with modern tooling and AI assistance!

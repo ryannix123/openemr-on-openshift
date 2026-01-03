@@ -8,27 +8,63 @@
 FROM quay.io/centos/centos:stream9 AS builder
 
 # OpenEMR version
-ARG OPENEMR_VERSION=7.0.5
+ARG OPENEMR_VERSION=7.0.4
 
-# Install download tools
-RUN dnf install -y \
-    curl \
-    tar \
-    gzip \
+# Enable EPEL and CRB repositories for additional packages
+RUN dnf install -y epel-release \
+    && dnf config-manager --set-enabled crb \
     && dnf clean all
 
-# Download OpenEMR source
+# Install Remi's repository for PHP 8.4
+RUN dnf install -y \
+    https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
+    && dnf clean all
+
+# Enable Remi's PHP 8.4 repository
+RUN dnf module reset php -y \
+    && dnf module enable php:remi-8.4 -y
+
+# Install build dependencies and tools
+RUN dnf install -y \
+    git \
+    unzip \
+    php-cli \
+    php-json \
+    php-mbstring \
+    php-xml \
+    php-zip \
+    && dnf clean all
+
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# Clone OpenEMR from GitHub (shallow clone of specific tag)
 WORKDIR /tmp
-RUN curl -fsSL "https://github.com/openemr/openemr/archive/refs/tags/v${OPENEMR_VERSION}.tar.gz" \
-    -o openemr.tar.gz \
-    && tar -xzf openemr.tar.gz \
-    && mv "openemr-${OPENEMR_VERSION}" openemr \
-    && rm openemr.tar.gz
+RUN git clone https://github.com/openemr/openemr.git --branch v7_0_4 --depth 1
+
+# InstallerAuto.php is included in OpenEMR source at contrib/util/installScripts/
+# It supports no_root_db_access mode which works with pre-created databases
+
+# Install PHP dependencies with Composer
+WORKDIR /tmp/openemr
+RUN composer install --no-dev --no-interaction --optimize-autoloader
+
+# Note: npm build skipped - OpenEMR handles frontend build on first run
+# This matches official OpenEMR Docker behavior and avoids build crashes
 
 # Remove unnecessary files to reduce image size
+# Keep composer vendor/ directory - it's required
+# Skip npm build - OpenEMR will build assets on first run
 RUN cd /tmp/openemr && \
-    rm -rf .git* .travis* tests docker contrib/util/docker \
-    && find . -type f -name "*.md" -delete
+    rm -rf .git .github .travis* tests docker contrib/util/docker \
+    && find . -type f -name "*.md" -delete \
+    && find . -type f -name "*.jar" -delete \
+    && find . -type f -name "*.war" -delete
+
+# Verify InstallerAuto.php exists before proceeding
+RUN test -f /tmp/openemr/contrib/util/installScripts/InstallerAuto.php \
+    && echo "✓ InstallerAuto.php found" \
+    || (echo "ERROR: InstallerAuto.php not found!" && exit 1)
 
 # ============================================================================
 # Stage 2: Runtime - Build final container
@@ -37,12 +73,14 @@ FROM quay.io/centos/centos:stream9
 
 LABEL maintainer="Ryan Nix <ryan_nix>" \
       description="OpenEMR on CentOS 9 Stream - OpenShift Ready" \
-      version="7.0.5" \
+      version="7.0.4" \
       io.k8s.description="OpenEMR Electronic Medical Records System" \
-      io.openshift.tags="openemr,healthcare,php,medical"
+      io.openshift.tags="openemr,healthcare,php,medical" \
+      io.openshift.expose-services="8080:http" \
+      app.openshift.io/runtime=php
 
 # Environment variables
-ENV OPENEMR_VERSION=7.0.5 \
+ENV OPENEMR_VERSION=7.0.4 \
     OPENEMR_WEB_ROOT=/var/www/html/openemr \
     PHP_FPM_PORT=9000 \
     NGINX_PORT=8080 \
@@ -52,6 +90,9 @@ ENV OPENEMR_VERSION=7.0.5 \
 RUN dnf install -y epel-release \
     && dnf config-manager --set-enabled crb \
     && dnf clean all
+
+# Update all packages to get security patches
+RUN dnf upgrade -y && dnf clean all
 
 # Install Remi's repository for PHP 8.4
 RUN dnf install -y \
@@ -102,8 +143,25 @@ RUN dnf install -y \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
+# Install Node.js 20 (required for OpenEMR frontend build)
+RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - \
+    && dnf install -y nodejs \
+    && dnf clean all \
+    && node --version && npm --version
+
 # Copy OpenEMR from builder stage
 COPY --from=builder /tmp/openemr ${OPENEMR_WEB_ROOT}
+
+# Verify InstallerAuto.php was copied
+RUN test -f ${OPENEMR_WEB_ROOT}/contrib/util/installScripts/InstallerAuto.php \
+    && echo "✓ InstallerAuto.php present in final image"
+
+# Build OpenEMR frontend assets
+WORKDIR ${OPENEMR_WEB_ROOT}
+RUN npm install --legacy-peer-deps \
+    && npm run build \
+    && rm -rf node_modules \
+    && echo "✓ Frontend assets built successfully"
 
 # ============================================================================
 # PHP Configuration
@@ -193,6 +251,11 @@ pm.status_path = /fpm-status
 ping.path = /fpm-ping
 ping.response = pong
 
+; Session configuration (Redis)
+php_value[session.save_handler] = redis
+php_value[session.save_path] = "tcp://redis:6379"
+php_value[session.gc_maxlifetime] = 7200
+
 ; Security
 php_admin_flag[log_errors] = on
 php_admin_value[error_log] = /dev/stderr
@@ -222,7 +285,6 @@ http {
     log_format main '$remote_addr - $remote_user [$time_local] "$request" '
                     '$status $body_bytes_sent "$http_referer" '
                     '"$http_user_agent" "$http_x_forwarded_for"';
-    
     access_log /dev/stdout main;
 
     # Performance
@@ -231,21 +293,16 @@ http {
     tcp_nodelay on;
     keepalive_timeout 65;
     types_hash_max_size 2048;
-    client_max_body_size 128M;
-    
-    # Gzip
+
+    # Gzip Compression
     gzip on;
     gzip_vary on;
     gzip_min_length 1024;
-    gzip_types text/plain text/css text/xml text/javascript 
-               application/x-javascript application/xml+rss 
-               application/javascript application/json;
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript 
+               application/xml application/xml+rss text/javascript application/x-font-ttf
+               font/opentype image/svg+xml;
 
     server {
         listen 8080 default_server;
@@ -321,7 +378,6 @@ RUN mkdir -p /var/log/supervisor
 RUN cat > /etc/supervisord.conf <<'EOF'
 [supervisord]
 nodaemon=true
-user=root
 logfile=/dev/stdout
 logfile_maxbytes=0
 loglevel=info
@@ -393,10 +449,12 @@ RUN chgrp -R 0 \
 # Make specific OpenEMR directories writable
 RUN chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents \
     && chmod -R 770 ${OPENEMR_WEB_ROOT}/sites \
-    && chmod -R 770 ${OPENEMR_WEB_ROOT}/interface/modules/zend_modules/config
+    && chmod -R 770 ${OPENEMR_WEB_ROOT}/interface/modules/zend_modules/config \
+    && mkdir -p ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods \
+    && chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc
 
 # Create entrypoint script
-RUN cat > /entrypoint.sh <<'EOF'
+RUN cat > /entrypoint.sh <<'ENTRYPOINT'
 #!/bin/bash
 set -e
 
@@ -417,11 +475,123 @@ echo "=========================================="
 echo "Setting permissions for UID $(id -u)..."
 chmod -R g=u ${OPENEMR_WEB_ROOT}/sites 2>/dev/null || true
 chmod -R g=u /tmp/sessions 2>/dev/null || true
+chmod -R g=u /var/lib/php/session 2>/dev/null || true
+
+# Create crypto keys directory (may be on mounted PVC, so create at runtime)
+mkdir -p ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods 2>/dev/null || true
+chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc 2>/dev/null || true
+
+# Test Redis connectivity and fall back to file sessions if needed
+echo "Testing session storage..."
+if php -r "try { \$r = new Redis(); \$r->connect('redis', 6379, 2); echo 'OK'; } catch (Exception \$e) { echo 'FAIL'; exit(1); }" 2>/dev/null; then
+    echo "✓ Redis session storage available"
+else
+    echo "⚠ Redis unavailable, falling back to file-based sessions"
+    # Update PHP-FPM to use file sessions
+    sed -i 's|php_value\[session.save_handler\] = redis|php_value\[session.save_handler\] = files|' /etc/php-fpm.d/www.conf
+    sed -i 's|php_value\[session.save_path\].*|php_value\[session.save_path\] = "/var/lib/php/session"|' /etc/php-fpm.d/www.conf
+fi
+
+# Check if OpenEMR is already configured (look for $config = 1 in sqlconf.php)
+SQLCONF="${OPENEMR_WEB_ROOT}/sites/default/sqlconf.php"
+INSTALLER="${OPENEMR_WEB_ROOT}/contrib/util/installScripts/InstallerAuto.php"
+
+# Debug: Show what files exist
+echo "Checking configuration status..."
+echo "  - sqlconf.php exists: $(test -f "$SQLCONF" && echo 'yes' || echo 'no')"
+echo "  - InstallerAuto.php exists: $(test -f "$INSTALLER" && echo 'yes' || echo 'no')"
+
+# Check if already configured ($config = 1 means configured)
+ALREADY_CONFIGURED=false
+if [ -f "$SQLCONF" ] && grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
+    ALREADY_CONFIGURED=true
+    echo "  - Configuration status: CONFIGURED"
+else
+    echo "  - Configuration status: NOT CONFIGURED"
+fi
+
+# Auto-configuration on first run
+if [ "$ALREADY_CONFIGURED" = false ] && [ -f "$INSTALLER" ]; then
+    echo "=========================================="
+    echo "Running OpenEMR Auto-Configuration"
+    echo "=========================================="
+    
+    # Set defaults if not provided
+    export MYSQL_HOST=${MYSQL_HOST:-mariadb}
+    export MYSQL_PORT=${MYSQL_PORT:-3306}
+    export MYSQL_DATABASE=${MYSQL_DATABASE:-openemr}
+    export MYSQL_USER=${MYSQL_USER:-openemr}
+    export MYSQL_PASS=${MYSQL_PASS:-openemr}
+    export OE_USER=${OE_USER:-admin}
+    export OE_PASS=${OE_PASS:-pass}
+    
+    echo "Database connection settings:"
+    echo "  - Host: ${MYSQL_HOST}"
+    echo "  - Port: ${MYSQL_PORT}"
+    echo "  - Database: ${MYSQL_DATABASE}"
+    echo "  - User: ${MYSQL_USER}"
+    echo "  - Admin User: ${OE_USER}"
+    
+    # Wait for database to be ready
+    echo "Waiting for database at ${MYSQL_HOST}..."
+    counter=0
+    while ! php -r "mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}') or exit(1);" 2>/dev/null; do
+        sleep 2
+        counter=$((counter+1))
+        echo "  Attempt $counter: waiting for database..."
+        if [ $counter -gt 30 ]; then
+            echo "ERROR: Database not ready after 60 seconds"
+            echo "Check that MariaDB pod is running and credentials are correct"
+            echo "Falling back to manual setup..."
+            break
+        fi
+    done
+    
+    if [ $counter -le 30 ]; then
+        echo "✓ Database connection successful"
+        
+        # Run InstallerAuto.php with no_root_db_access mode
+        # This uses the pre-created database and user from MariaDB container
+        echo "Running InstallerAuto.php (no_root_db_access mode)..."
+        cd ${OPENEMR_WEB_ROOT}
+        
+        # Enable the installer script
+        export OPENEMR_ENABLE_INSTALLER_AUTO=1
+        
+        php -f contrib/util/installScripts/InstallerAuto.php \
+            no_root_db_access=1 \
+            server="${MYSQL_HOST}" \
+            port="${MYSQL_PORT}" \
+            login="${MYSQL_USER}" \
+            pass="${MYSQL_PASS}" \
+            dbname="${MYSQL_DATABASE}" \
+            iuser="${OE_USER}" \
+            iuserpass="${OE_PASS}" \
+            iuname="Administrator" \
+            2>&1 \
+            && echo "✓ Auto-configuration completed successfully!" \
+            || echo "⚠ Auto-configuration had issues, check logs above"
+        
+        # Verify configuration was successful
+        if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
+            echo "✓ OpenEMR configured and ready!"
+        else
+            echo "⚠ Configuration may not be complete - manual setup may be required"
+        fi
+        
+        echo "=========================================="
+    fi
+elif [ "$ALREADY_CONFIGURED" = true ]; then
+    echo "✓ OpenEMR already configured, skipping auto-configuration"
+else
+    echo "⚠ InstallerAuto.php not found - manual setup required"
+    echo "  Visit the web interface to complete setup"
+fi
 
 # Start supervisor (manages nginx + PHP-FPM)
 echo "Starting services via supervisord..."
 exec /usr/bin/supervisord -c /etc/supervisord.conf
-EOF
+ENTRYPOINT
 
 RUN chmod +x /entrypoint.sh && chgrp 0 /entrypoint.sh && chmod g=u /entrypoint.sh
 
