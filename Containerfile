@@ -445,6 +445,13 @@ RUN chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents \
     && mkdir -p ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods \
     && chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc
 
+# Backup sites/default for PVC initialization
+# When a PVC is mounted at sites/default, it will be empty on first run
+# The entrypoint will restore these files to initialize the PVC
+RUN cp -a ${OPENEMR_WEB_ROOT}/sites/default /opt/openemr-sites-default-backup \
+    && chgrp -R 0 /opt/openemr-sites-default-backup \
+    && chmod -R g=u /opt/openemr-sites-default-backup
+
 # Create entrypoint script
 RUN cat > /entrypoint.sh <<'ENTRYPOINT'
 #!/bin/bash
@@ -462,6 +469,22 @@ echo "  - PHP-FPM: 127.0.0.1:${PHP_FPM_PORT}"
 echo "  - nginx: 0.0.0.0:${NGINX_PORT}"
 echo "  - UID: $(id -u), GID: $(id -g)"
 echo "=========================================="
+
+# Initialize PVC if empty (first run with freshly mounted PVC)
+# Check if config.php exists - if not, PVC is empty and needs initialization
+# We check config.php (not sqlconf.php) because config.php is static and only exists after restore
+echo "Checking if site files need to be restored..."
+if [ ! -f "${OPENEMR_WEB_ROOT}/sites/default/config.php" ]; then
+    echo "Site files missing - initializing from backup..."
+    if [ -d "/opt/openemr-sites-default-backup" ]; then
+        cp -a /opt/openemr-sites-default-backup/* ${OPENEMR_WEB_ROOT}/sites/default/
+        echo "✓ Site files restored from backup"
+    else
+        echo "⚠ No backup found at /opt/openemr-sites-default-backup"
+    fi
+else
+    echo "✓ Site files already present"
+fi
 
 # Ensure permissions are correct (OpenShift may assign random UID)
 echo "Setting permissions for UID $(id -u)..."

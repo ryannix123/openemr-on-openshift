@@ -416,7 +416,7 @@ deploy_openemr() {
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: openemr-documents
+  name: openemr-sites
   labels:
     app: openemr
     app.kubernetes.io/name: openemr
@@ -432,7 +432,7 @@ spec:
   storageClassName: $STORAGE_CLASS
 EOF
     
-    print_success "Documents PVC created"
+    print_success "Sites PVC created"
     
     # Create OpenEMR admin secret
     print_info "Creating OpenEMR admin secret..."
@@ -541,8 +541,8 @@ spec:
               name: mariadb-secret
               key: database-password
         volumeMounts:
-        - name: openemr-documents
-          mountPath: /var/www/html/openemr/sites/default/documents
+        - name: openemr-sites
+          mountPath: /var/www/html/openemr/sites/default
         livenessProbe:
           httpGet:
             path: /health
@@ -565,9 +565,9 @@ spec:
             memory: 384Mi
             cpu: 200m
       volumes:
-      - name: openemr-documents
+      - name: openemr-sites
         persistentVolumeClaim:
-          claimName: openemr-documents
+          claimName: openemr-sites
 EOF
     
     print_success "OpenEMR deployment created"
@@ -729,7 +729,7 @@ cleanup() {
     oc delete secret openemr-secret mariadb-secret --ignore-not-found
     
     print_warning "PVCs are NOT deleted automatically. To delete them:"
-    echo "  oc delete pvc openemr-documents mariadb-data"
+    echo "  oc delete pvc openemr-sites mariadb-data"
     
     print_success "Cleanup complete!"
 }
