@@ -1,0 +1,148 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# OpenEMR Container Build Pipeline
+# Builds with Podman and pushes to Quay.io
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Required GitHub Secrets:
+#   QUAY_USERNAME - Quay.io robot account (format: username+robotname)
+#   QUAY_PASSWORD - Quay.io robot token
+#
+# Usage:
+#   - Manual: Actions → Build and Push OpenEMR → Run workflow
+#   - Scheduled: Runs automatically every Monday at 6am UTC
+#   - On push: Builds when Containerfile or workflow changes on main branch
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Build and Push OpenEMR
+
+on:
+  # Manual trigger with version input
+  workflow_dispatch:
+    inputs:
+      openemr_version:
+        description: 'OpenEMR version to build (e.g., 7.0.4)'
+        required: false
+        default: ''
+
+  # Auto-run weekly to pick up security updates
+  schedule:
+  - cron: '0 6 * * 1' # Every Monday at 6am UTC
+
+  # Build on push to main when container-related files change
+  push:
+    branches: [ main ]
+    paths:
+    - 'Containerfile'
+    - 'configs/**'
+    - 'scripts/**'
+    - 'deploy-openemr.sh'
+    - '.github/workflows/build-openemr.yml'
+
+env:
+  REGISTRY: quay.io
+  IMAGE_NAME: ryan_nix/openemr-openshift
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Determine which OpenEMR version to build
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Determine OpenEMR version
+      id: version
+      run: |
+        # Use manual input if provided
+        if [ -n "${{ inputs.openemr_version }}" ]; then
+          VERSION="${{ inputs.openemr_version }}"
+          echo "Using manually specified version: ${VERSION}"
+        else
+          # Fetch latest stable version from OpenEMR GitHub releases
+          echo "Fetching latest OpenEMR version..."
+          VERSION=$(curl -sL https://api.github.com/repos/openemr/openemr/releases/latest | \
+                    grep -oP '"tag_name":\s*"v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          
+          if [ -z "${VERSION}" ]; then
+            echo "::warning::Failed to determine latest version, using default 7.0.4"
+            VERSION="7.0.4"
+          fi
+          echo "Latest stable version: ${VERSION}"
+        fi
+
+        # Convert version to git tag format (7.0.4 -> v7_0_4)
+        GIT_TAG="v$(echo ${VERSION} | tr '.' '_')"
+        
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "git_tag=${GIT_TAG}" >> $GITHUB_OUTPUT
+        echo "### 🏷️ Building OpenEMR ${VERSION}" >> $GITHUB_STEP_SUMMARY
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Check if this version already exists in registry (skip if so)
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Check if image already exists
+      id: check
+      run: |
+        # Try to pull the manifest without downloading the image
+        if podman manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} > /dev/null 2>&1; then
+          echo "Image tag ${{ steps.version.outputs.version }} already exists"
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "Image tag ${{ steps.version.outputs.version }} not found, will build"
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Build the container image
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Build with Podman
+      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "Building OpenEMR ${{ steps.version.outputs.version }}..."
+
+        podman build \
+          --build-arg OPENEMR_VERSION=${{ steps.version.outputs.version }} \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          -f Containerfile \
+          .
+
+        echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
+        echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Push to Quay.io
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Log in to Quay.io
+      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      run: |
+        podman login \
+          --username ${{ secrets.QUAY_USERNAME }} \
+          --password ${{ secrets.QUAY_PASSWORD }} \
+          ${{ env.REGISTRY }}
+
+    - name: Push to Quay.io
+      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "Pushing images to Quay.io..."
+
+        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+        echo "### 🚀 Push completed" >> $GITHUB_STEP_SUMMARY
+        echo "- Version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Latest tag: \`latest\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Registry: [quay.io/${{ env.IMAGE_NAME }}](https://${{ env.REGISTRY }}/repository/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Summary for skipped builds
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Skip summary
+      if: steps.check.outputs.exists == 'true' && github.event_name != 'workflow_dispatch'
+      run: |
+        echo "### ⏭️ Build skipped" >> $GITHUB_STEP_SUMMARY
+        echo "Image \`${{ steps.version.outputs.version }}\` already exists in registry." >> $GITHUB_STEP_SUMMARY
+        echo "Use manual workflow dispatch to force a rebuild." >> $GITHUB_STEP_SUMMARY
