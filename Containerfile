@@ -168,19 +168,19 @@ RUN npm install --legacy-peer-deps \
 # ============================================================================
 
 # Create custom PHP configuration for OpenEMR
-RUN cat > /etc/php.d/99-openemr.ini <<EOF
-; OpenEMR PHP Configuration
-; File Upload Settings (for medical documents, images, lab results)
+RUN cat > /etc/php.d/99-openemr.ini <<'EOF'
+# OpenEMR PHP Configuration
+# File Upload Settings (for medical documents, images, lab results)
 upload_max_filesize = 128M
 post_max_size = 128M
 max_input_vars = 3000
 
-; Memory and Execution
+# Memory and Execution
 memory_limit = 512M
 max_execution_time = 300
 max_input_time = 300
 
-; Session Configuration (Redis-backed for multi-pod deployments)
+# Session Configuration (Redis-backed for multi-pod deployments)
 session.save_handler = redis
 session.save_path = "tcp://redis:6379"
 session.gc_maxlifetime = 7200
@@ -188,22 +188,22 @@ session.cookie_httponly = 1
 session.cookie_secure = 1
 session.use_strict_mode = 1
 
-; Error Handling (Production)
+# Error Handling (Production)
 display_errors = Off
 display_startup_errors = Off
 error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
 log_errors = On
 error_log = /dev/stderr
 
-; Security
+# Security
 expose_php = Off
 allow_url_fopen = On
 allow_url_include = Off
 
-; Date/Time
+# Date/Time
 date.timezone = UTC
 
-; OPcache (Performance)
+# OPcache (Performance)
 opcache.enable = 1
 opcache.memory_consumption = 256
 opcache.interned_strings_buffer = 16
