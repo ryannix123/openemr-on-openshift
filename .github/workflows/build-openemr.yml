@@ -33,6 +33,8 @@ on:
     branches: [ main ]
     paths:
     - 'Containerfile'
+    - 'configs/**'
+    - 'scripts/**'
     - 'deploy-openemr.sh'
     - '.github/workflows/build-openemr.yml'
 
