@@ -6,7 +6,7 @@ Deploy [OpenEMR](https://www.open-emr.org/) 7.0.4 - the most popular open-source
 
 ## Overview
 
-This project provides a production-ready container image and deployment script for running OpenEMR on OpenShift, including the free [Developer Sandbox](https://developers.redhat.com/developer-sandbox), where you can test drive the latest version of OpenShift!
+This project provides a production-ready container image and deployment script for running OpenEMR on OpenShift, including the free [Developer Sandbox](https://developers.redhat.com/developer-sandbox).
 
 **Stack:**
 - **OpenEMR 7.0.4** - Electronic Health Records system
@@ -28,7 +28,7 @@ This project provides a production-ready container image and deployment script f
 | **Resource Management** | CPU/memory limits prevent runaway processes |
 | **Easy Scaling** | Scale replicas with a single command (with shared storage) |
 | **Built-in Monitoring** | OpenShift console provides metrics, logs, and topology visualization |
-| **Developer Sandbox** | Free 30-day environment for testing the latest OpenShift. The sandbox is NOT for production deployments!|
+| **Developer Sandbox** | Free 30-day environment for testing - no credit card required |
 
 ## Prerequisites
 
@@ -304,22 +304,6 @@ oc exec deployment/openemr -- grep "config = " /var/www/html/openemr/sites/defau
 # Should show: $config = 1
 ```
 
-### Waking Up Your Deployment
-
-When you return after the sandbox has hibernated, your pods will be scaled down. Run this command to bring everything back up:
-
-```bash
-# Scale all deployments back to 1 replica
-oc scale deployment --all --replicas=1
-
-# Or specify your namespace explicitly
-oc scale deployment --all --replicas=1 -n $(oc project -q)
-```
-
-Your data persists in the PVCs — only the pods are stopped during hibernation.
-
----
-
 ## Developer Sandbox Limitations
 
 The free Developer Sandbox has some constraints:
@@ -327,6 +311,28 @@ The free Developer Sandbox has some constraints:
 - **Resources:** Limited CPU and memory quotas
 - **Duration:** 30-day sandbox, renewable
 - **Idle timeout:** Pods sleep after 12 hours of inactivity
+
+### Checking Your Quotas
+
+View your resource quotas and usage:
+
+```bash
+# List all resource quotas
+oc get resourcequota
+
+# Get detailed quota information
+oc describe resourcequota
+
+# Check limit ranges (per-pod/container limits)
+oc get limitrange
+oc describe limitrange
+
+# View current resource usage vs quotas
+oc get quota -o yaml
+
+# Check applied quotas for your project
+oc describe project $(oc project -q)
+```
 
 For production deployments, use a full OpenShift cluster with:
 - RWX storage for multi-replica scaling
@@ -345,15 +351,16 @@ Contributions welcome! Please open issues or pull requests for:
 
 ## License
 
+This deployment configuration is provided under the MIT License.
+
 OpenEMR itself is licensed under [GPL-3.0](https://github.com/openemr/openemr/blob/master/LICENSE).
 
 ## Acknowledgments
 
 - [OpenEMR Project](https://www.open-emr.org/) - The open-source EHR community
-- [Red Hat](https://www.redhat.com/) - for OpenShift and the Developer Sandbox
-- Claude (Anthropic) Opus 4.5 - AI-assisted debugging and documentation
-
+- [Red Hat](https://sandbox.redhat.com/) - OpenShift Developer Sandbox
+- [Claude] (https://claude.ai) Opus 4.5 (Anthropic) - AI-assisted debugging and documentation
 
 ---
 
-**Note:** This project containerized OpenEMR for OpenShift in 2026. Pull requests for this deployment are welcome!
+**Note:** This project containerized OpenEMR 7.0.4 for OpenShift 4.20 in 2026. I made a similiar project for my Master's thesis in 2020 targeting OpenEMR 5.x on OpenShift 3.11 - what took me months then now takes hours with modern tooling and AI assistance!
