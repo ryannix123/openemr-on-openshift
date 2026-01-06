@@ -213,10 +213,12 @@ openssl rand -base64 24  # ✗ Contains special characters
 ### 5. Node.js Version for Frontend Build
 **Problem:** OpenEMR's npm build requires Node.js 18+, but CentOS 9 ships with Node.js 16.
 
-**Solution:** Install Node.js 20 from NodeSource:
-```dockerfile
-RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - \
-    && dnf install -y nodejs
+**Solution:** Install Node.js 22 from NodeSource:
+```# Install Node.js 22 LTS from AppStream (required for OpenEMR frontend build)
+RUN dnf module enable nodejs:22 -y \
+    && dnf install -y nodejs npm \
+    && dnf clean all \
+    && node --version && npm --version
 ```
 
 ### 6. OpenShift Arbitrary User IDs
