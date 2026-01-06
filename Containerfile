@@ -135,9 +135,9 @@ RUN dnf install -y \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# Install Node.js 20 (required for OpenEMR frontend build)
-RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - \
-    && dnf install -y nodejs \
+# Install Node.js 22 LTS from AppStream (required for OpenEMR frontend build)
+RUN dnf module enable nodejs:22 -y \
+    && dnf install -y nodejs npm \
     && dnf clean all \
     && node --version && npm --version
 
