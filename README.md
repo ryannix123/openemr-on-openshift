@@ -31,6 +31,7 @@ This project provides a complete containerized deployment of OpenEMR (Open-sourc
 ### ✨ Key Features
 
 - **Custom OpenEMR Container**: Built on CentOS 10 Stream with Remi's PHP 8.5
+- **CI/CD Pipeline**: GitHub Actions builds and pushes to Quay.io on every change, with weekly rebuilds for security patches
 - **Redis Session Storage**: Redis 8 Alpine for improved performance and scalability
 - **MariaDB 11.8**: Latest Fedora MariaDB for robust database backend
 - **Developer Sandbox Ready**: Optimized for Developer Sandbox storage and resource constraints
@@ -163,24 +164,40 @@ Whether you're a solo practitioner, a community health center, or a large health
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/ryannix123/openemr-openshift.git
+git clone https://github.com/ryannix123/openemr-on-openshift.git
 cd openemr-openshift
 ```
 
 ### 2. Build the Container (Optional)
 
-If you want to build your own container:
+The container is automatically built and pushed to Quay.io via GitHub Actions CI/CD. You can use the pre-built image directly:
+
+```
+quay.io/ryan_nix/openemr-openshift:latest
+```
+
+The CI/CD pipeline:
+- Builds on every push to `main` when container-related files change
+- Rebuilds weekly (Mondays at 6am UTC) to pick up base image security patches
+- Can be triggered manually via GitHub Actions with optional version override
+- Caches layers with GitHub Actions cache for fast rebuilds
+
+If you want to build locally instead:
 
 ```bash
-# Build the container (creates both :latest and :8.0.0 tags)
-podman build -t quay.io/ryan_nix/openemr-openshift:latest .
+# Build the container
+podman build --platform linux/amd64 \
+  -t quay.io/ryan_nix/openemr-openshift:8.0.0 \
+  -t quay.io/ryan_nix/openemr-openshift:latest \
+  -f Containerfile .
 
 # Push to Quay.io
 podman login quay.io
+podman push quay.io/ryan_nix/openemr-openshift:8.0.0
 podman push quay.io/ryan_nix/openemr-openshift:latest
 ```
 
-Or use the pre-built image: `quay.io/ryan_nix/openemr-openshift:latest`
+> **Note**: Building with `--platform linux/amd64` on Apple Silicon (M1/M2/M3/M4) may fail with CentOS Stream 10 due to QEMU userspace emulation issues. Use the GitHub Actions pipeline or build on a native x86_64 host.
 
 ### 3. Configure the Deployment (Optional)
 
@@ -295,10 +312,10 @@ All required OpenEMR extensions are included:
 - php-imap (email)
 - php-sodium (encryption)
 - php-pecl-redis5 (session storage)
-- php-ldap (LDAP authentication)
-- php-soap (web services)
-- php-imap (email)
-- php-sodium (encryption)
+- php-bcmath (arbitrary precision math)
+- php-intl (internationalization)
+- php-tidy (HTML cleanup)
+- php-xmlrpc (XML-RPC)
 
 ### Health Checks
 
@@ -446,26 +463,35 @@ oc rsync openemr-pod:/var/www/html/openemr/sites/default/documents ./backup/docu
 
 ### Updates
 
-**Update OpenEMR container:**
-```bash
-# Build new version
-podman build -t quay.io/ryan_nix/openemr-openshift:7.0.6 .
-podman push quay.io/ryan_nix/openemr-openshift:7.0.6
+Container updates are handled automatically by the CI/CD pipeline. To update to a new OpenEMR version:
 
-# Update deployment
+1. Update `OPENEMR_VERSION` in the `Containerfile`
+2. Push to `main` — GitHub Actions will build and push the new image
+3. Roll out the update to your cluster:
+
+```bash
+# Update deployment to use the new image tag
 oc set image deployment/openemr \
-  openemr=quay.io/ryan_nix/openemr-openshift:7.0.6 -n openemr
+  openemr=quay.io/ryan_nix/openemr-openshift:8.0.1 -n openemr
 ```
+
+To manually trigger a rebuild (e.g., to pick up security patches immediately):
+1. Go to **Actions** → **Build and Push OpenEMR** → **Run workflow**
+2. Optionally check **Force rebuild** to rebuild even if the tag already exists
 
 ## Project Structure
 
 ```
 openemr-openshift/
-├── Containerfile              # Container build instructions
-├── deploy-openemr.sh          # Automated deployment script
-├── README.md                  # This file
-├── .containerignore           # Files to ignore during build
-└── manifests/                 # (Optional) Individual YAML files
+├── Containerfile                          # Multi-stage container build
+├── deploy-openemr.sh                     # Automated deployment script
+├── build-container.sh                    # Local container build helper
+├── README.md                             # This file
+├── .containerignore                      # Files to ignore during build
+├── .github/
+│   └── workflows/
+│       └── build-image.yml               # CI/CD: build & push to Quay.io
+└── manifests/                            # (Optional) Individual YAML files
     ├── deployment.yaml
     ├── service.yaml
     ├── route.yaml
@@ -498,7 +524,7 @@ This project follows OpenEMR's licensing. OpenEMR is licensed under GPL v3.
 
 ## Author
 
-**Ryan Nix**
+**Ryan Nix** — projects are personal, not official Red Hat
 - Senior Solutions Architect, Red Hat
 - GitHub: [@ryannix123](https://github.com/ryannix123)
 - Quay.io: [ryan_nix](https://quay.io/user/ryan_nix)

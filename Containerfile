@@ -11,12 +11,15 @@ FROM quay.io/centos/centos:stream10 AS builder
 ARG OPENEMR_VERSION=8.0.0
 
 # Enable EPEL and CRB repositories for additional packages
-RUN dnf install -y epel-release \
+# Note: CentOS Stream 10 has GPG key crypto-policy issues, using --nogpgcheck for epel-release
+RUN dnf install -y --nogpgcheck epel-release \
+    && dnf install -y dnf-plugins-core \
     && dnf config-manager --set-enabled crb \
     && dnf clean all
 
 # Install Remi's repository for PHP 8.5
-RUN dnf install -y \
+# Note: Using --nogpgcheck due to CentOS Stream 10 crypto-policy compatibility
+RUN dnf install -y --nogpgcheck \
     https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
     && dnf clean all
 
@@ -79,7 +82,9 @@ ENV OPENEMR_VERSION=8.0.0 \
     PHP_VERSION=8.5
 
 # Enable EPEL and CRB repositories
-RUN dnf install -y epel-release \
+# Note: CentOS Stream 10 has GPG key crypto-policy issues, using --nogpgcheck for epel-release
+RUN dnf install -y --nogpgcheck epel-release \
+    && dnf install -y dnf-plugins-core \
     && dnf config-manager --set-enabled crb \
     && dnf clean all
 
@@ -87,7 +92,8 @@ RUN dnf install -y epel-release \
 RUN dnf upgrade -y && dnf clean all
 
 # Install Remi's repository for PHP 8.5
-RUN dnf install -y \
+# Note: Using --nogpgcheck due to CentOS Stream 10 crypto-policy compatibility
+RUN dnf install -y --nogpgcheck \
     https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
     && dnf clean all
 

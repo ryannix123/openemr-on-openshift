@@ -721,16 +721,33 @@ cleanup() {
     
     print_info "Cleaning up OpenEMR deployment..."
     
+    # Delete deployments
+    print_info "Deleting deployments..."
     oc delete deployment openemr redis --ignore-not-found
-    oc delete deployment mariadb --ignore-not-found
+    oc delete statefulset mariadb --ignore-not-found
+    
+    # Delete services
+    print_info "Deleting services..."
     oc delete service openemr redis mariadb --ignore-not-found
+    
+    # Delete routes
+    print_info "Deleting routes..."
     oc delete route openemr --ignore-not-found
+    
+    # Delete secrets
+    print_info "Deleting secrets..."
     oc delete secret openemr-secret mariadb-secret --ignore-not-found
     
-    print_warning "PVCs are NOT deleted automatically. To delete them:"
-    echo "  oc delete pvc openemr-sites mariadb-data"
+    # Delete ConfigMaps
+    print_info "Deleting ConfigMaps..."
+    oc delete configmap redis-config --ignore-not-found
     
-    print_success "Cleanup complete!"
+    # Delete PVCs
+    print_warning "Deleting PVCs (this will DELETE ALL DATA!)..."
+    print_info "Deleting PersistentVolumeClaims..."
+    oc delete pvc openemr-documents mariadb-data redis-data --ignore-not-found
+    
+    print_success "Cleanup complete! All resources deleted."
 }
 
 ##############################################################################
@@ -744,15 +761,17 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --deploy    Deploy OpenEMR (default if no option specified)"
-    echo "  --cleanup   Remove all OpenEMR resources from current project"
+    echo "  --cleanup   Remove all OpenEMR resources INCLUDING PVCs (DELETES ALL DATA!)"
     echo "  --status    Show status of OpenEMR deployment"
     echo "  --help      Show this help message"
     echo ""
     echo "Examples:"
     echo "  $0              # Deploy OpenEMR"
     echo "  $0 --deploy     # Deploy OpenEMR"
-    echo "  $0 --cleanup    # Remove all OpenEMR resources"
+    echo "  $0 --cleanup    # Remove all resources and delete all data"
     echo "  $0 --status     # Check deployment status"
+    echo ""
+    echo "WARNING: --cleanup will permanently delete all patient data and documents!"
     echo ""
 }
 

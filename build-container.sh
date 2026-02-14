@@ -90,9 +90,11 @@ build_container() {
     print_header "Building Container"
     
     print_info "Building OpenEMR ${OPENEMR_VERSION} container..."
+    print_info "Target platform: linux/amd64 (for OpenShift compatibility)"
     print_info "This may take several minutes..."
     
     $CONTAINER_CMD build \
+        --platform linux/amd64 \
         --build-arg OPENEMR_VERSION=${OPENEMR_VERSION} \
         -t ${FULL_IMAGE}:${OPENEMR_VERSION} \
         -t ${FULL_IMAGE}:latest \
