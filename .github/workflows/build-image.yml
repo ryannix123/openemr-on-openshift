@@ -56,6 +56,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # ─────────────────────────────────────────────────────────────────────────
       # Determine which OpenEMR version to build
@@ -81,17 +83,42 @@ jobs:
           echo "### 📦 Build Version: ${VERSION}" >> $GITHUB_STEP_SUMMARY
 
       # ─────────────────────────────────────────────────────────────────────────
-      # Check if image already exists in registry (skip if force or scheduled)
+      # Detect if container-related files changed in this push
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Check for container file changes
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Check if Containerfile or build-related files changed in this push
+            if git diff --name-only HEAD~1 HEAD | grep -qE '^(Containerfile|configs/|scripts/)'; then
+              echo "container_changed=true" >> $GITHUB_OUTPUT
+              echo "Container-related files changed - will force rebuild"
+            else
+              echo "container_changed=false" >> $GITHUB_OUTPUT
+              echo "No container-related file changes detected"
+            fi
+          else
+            echo "container_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Check if image already exists in registry (skip if force, scheduled,
+      # or container files changed)
       # ─────────────────────────────────────────────────────────────────────────
       - name: Check if image exists in registry
         id: check
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           FORCE="${{ inputs.force_rebuild }}"
+          CONTAINER_CHANGED="${{ steps.changes.outputs.container_changed }}"
           
-          # Always rebuild on schedule to pick up base image security updates
-          if [ "$FORCE" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "Force/scheduled rebuild - skipping existence check"
+          # Always rebuild on schedule, force, or when container files changed
+          if [ "$FORCE" = "true" ] || [ "${{ github.event_name }}" = "schedule" ] || [ "$CONTAINER_CHANGED" = "true" ]; then
+            REASON=""
+            [ "$FORCE" = "true" ] && REASON="force rebuild requested"
+            [ "${{ github.event_name }}" = "schedule" ] && REASON="scheduled rebuild"
+            [ "$CONTAINER_CHANGED" = "true" ] && REASON="container files changed"
+            echo "${REASON} - skipping existence check"
             echo "exists=false" >> $GITHUB_OUTPUT
             exit 0
           fi
