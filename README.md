@@ -87,7 +87,7 @@ Whether you're a solo practitioner, a community health center, or a large health
          │              │
     ┌────▼────────┐ ┌──▼───────────┐
     │ Redis Pod   │ │ MariaDB      │
-    │ (sessions)  │ │ StatefulSet  │
+    │ (sessions)  │ │ Deployment   │
     └────┬────────┘ └──┬───────────┘
          │             │
     ┌────▼────────┐ ┌─▼────────────┐
@@ -255,7 +255,7 @@ The deployment uses **AWS EBS gp3** storage (default in Developer Sandbox):
 1. Deploy on a full OpenShift cluster with RWX storage (e.g., ODF CephFS)
 2. Update storage class to RWX-capable storage
 3. Change `ReadWriteOnce` to `ReadWriteMany` in documents PVC
-4. Then scale: `oc scale deployment/openemr --replicas=3 -n openemr`
+4. Then scale: `oc scale deployment/openemr --replicas=3`
 
 ### Resource Limits
 
@@ -330,13 +330,13 @@ The container exposes these endpoints:
 
 ```bash
 # OpenEMR application logs
-oc logs -f deployment/openemr -n openemr
+oc logs -f $(oc get pod -l app=openemr -o name)
 
 # MariaDB logs
-oc logs -f statefulset/mariadb -n openemr
+oc logs -f $(oc get pod -l app=mariadb -o name)
 
 # Get all pods
-oc get pods -n openemr
+oc get pods
 ```
 
 ### Common Issues
@@ -344,28 +344,28 @@ oc get pods -n openemr
 **Pod not starting:**
 ```bash
 # Describe the pod for events
-oc describe pod <pod-name> -n openemr
+oc describe pod <pod-name>
 
 # Check for image pull errors
-oc get events -n openemr --sort-by='.lastTimestamp'
+oc get events --sort-by='.lastTimestamp'
 ```
 
 **Storage issues:**
 ```bash
 # Check PVC status
-oc get pvc -n openemr
+oc get pvc
 
 # Describe PVC for binding issues
-oc describe pvc <pvc-name> -n openemr
+oc describe pvc <pvc-name>
 ```
 
 **Database connection errors:**
 ```bash
 # Verify MariaDB is running
-oc get pods -l app=mariadb -n openemr
+oc get pods -l app=mariadb
 
 # Test database connectivity from OpenEMR pod
-oc exec -it deployment/openemr -n openemr -- bash
+oc exec -it $(oc get pod -l app=openemr -o name) -- bash
 # Inside the pod:
 php -r "mysqli_connect('mariadb', 'openemr', 'password', 'openemr') or die(mysqli_connect_error());"
 ```
@@ -375,8 +375,9 @@ php -r "mysqli_connect('mariadb', 'openemr', 'password', 'openemr') or die(mysql
 To completely remove and redeploy:
 
 ```bash
-oc delete project openemr
-# Wait for project to fully delete, then re-run:
+# Run the cleanup script
+./deploy-openemr.sh --cleanup
+# Wait for all pods to terminate, then re-run:
 ./deploy-openemr.sh
 ```
 
@@ -451,7 +452,7 @@ For production healthcare deployments:
 **Database backup:**
 ```bash
 # Create database dump
-oc exec -it statefulset/mariadb -n openemr -- \
+oc exec -it $(oc get pod -l app=mariadb -o name) -- \
   mysqldump -u root -p"$DB_ROOT_PASSWORD" openemr > openemr-backup-$(date +%Y%m%d).sql
 ```
 
@@ -472,7 +473,7 @@ Container updates are handled automatically by the CI/CD pipeline. To update to 
 ```bash
 # Update deployment to use the new image tag
 oc set image deployment/openemr \
-  openemr=quay.io/ryan_nix/openemr-openshift:8.0.1 -n openemr
+  openemr=quay.io/ryan_nix/openemr-openshift:8.0.1
 ```
 
 To manually trigger a rebuild (e.g., to pick up security patches immediately):
@@ -496,7 +497,7 @@ openemr-openshift/
     ├── service.yaml
     ├── route.yaml
     └── mariadb/
-        ├── statefulset.yaml
+        ├── deployment.yaml
         └── service.yaml
 ```
 
