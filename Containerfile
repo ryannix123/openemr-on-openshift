@@ -323,6 +323,11 @@ http {
             include fastcgi_params;
         }
 
+        # OpenEMR Zend Module routes (Manage Modules, Carecoordination, etc.)
+        location /interface/modules/zend_modules {
+            try_files $uri $uri/ /interface/modules/zend_modules/public/index.php?$query_string;
+        }
+
         # OpenEMR main application
         location / {
             try_files $uri $uri/ /index.php?$query_string;
