@@ -67,7 +67,7 @@ RUN test -f /tmp/openemr/contrib/util/installScripts/InstallerAuto.php \
 FROM quay.io/centos/centos:stream10
 
 LABEL maintainer="Ryan Nix <ryan_nix>" \
-      description="OpenEMR on CentOS 9 Stream - OpenShift Ready" \
+      description="OpenEMR on CentOS 10 Stream - OpenShift Ready" \
       version="8.0.0" \
       io.k8s.description="OpenEMR Electronic Medical Records System" \
       io.openshift.tags="openemr,healthcare,php,medical" \
@@ -161,6 +161,15 @@ RUN npm install --legacy-peer-deps \
     && rm -rf node_modules \
     && echo "✓ Frontend assets built successfully"
 
+# Fix relative path resolution for nginx + PHP-FPM
+# Apache mod_php auto-sets CWD to the script's directory on each request;
+# PHP-FPM does not, which breaks OpenEMR's relative require paths (e.g., ../globals.php).
+# This prepend script restores that behavior.
+RUN cat > ${OPENEMR_WEB_ROOT}/auto_prepend.php <<'EOF'
+<?php
+chdir(dirname($_SERVER['SCRIPT_FILENAME']));
+EOF
+
 # ============================================================================
 # PHP Configuration
 # ============================================================================
@@ -200,6 +209,11 @@ allow_url_include = Off
 
 ; Date/Time
 date.timezone = UTC
+
+; Working directory fix for nginx + PHP-FPM
+; OpenEMR uses relative paths (e.g., ../globals.php) that require
+; the CWD to match the script's directory, as Apache mod_php does
+auto_prepend_file = /var/www/html/openemr/auto_prepend.php
 
 ; OPcache (Performance)
 opcache.enable = 1

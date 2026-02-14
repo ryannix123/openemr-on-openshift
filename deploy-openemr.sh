@@ -723,8 +723,7 @@ cleanup() {
     
     # Delete deployments
     print_info "Deleting deployments..."
-    oc delete deployment openemr redis --ignore-not-found
-    oc delete statefulset mariadb --ignore-not-found
+    oc delete deployment openemr redis mariadb --ignore-not-found
     
     # Delete services
     print_info "Deleting services..."
