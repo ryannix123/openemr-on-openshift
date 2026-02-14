@@ -26,7 +26,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration - PROJECT_NAME will be set dynamically from current context
-OPENEMR_IMAGE="quay.io/ryan_nix/openemr-openshift:7.0.4"
+OPENEMR_IMAGE="quay.io/ryan_nix/openemr-openshift:latest"
 MARIADB_IMAGE="quay.io/fedora/mariadb-118:latest"
 REDIS_IMAGE="docker.io/redis:8-alpine"
 
