@@ -161,6 +161,13 @@ RUN npm install --legacy-peer-deps \
     && rm -rf node_modules \
     && echo "✓ Frontend assets built successfully"
 
+# Install CCDA/CQM service dependencies (Node.js microservices for
+# C-CDA document exchange and Clinical Quality Measures reporting)
+# These run as a supervised process alongside nginx and PHP-FPM
+RUN cd ${OPENEMR_WEB_ROOT}/ccdaservice \
+    && npm install --legacy-peer-deps \
+    && echo "✓ CCDA/CQM service dependencies installed"
+
 # Fix relative path resolution for nginx + PHP-FPM
 # Apache mod_php auto-sets CWD to the script's directory on each request;
 # PHP-FPM does not, which breaks OpenEMR's relative require paths (e.g., ../globals.php).
@@ -387,7 +394,7 @@ http {
 EOF
 
 # ============================================================================
-# Supervisor Configuration (manages nginx + PHP-FPM)
+# Supervisor Configuration (manages nginx + PHP-FPM + CCDA/CQM service)
 # ============================================================================
 
 RUN mkdir -p /var/log/supervisor
@@ -417,6 +424,21 @@ command=/usr/sbin/nginx -g 'daemon off;'
 autostart=true
 autorestart=true
 priority=10
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+stdout_events_enabled=true
+stderr_events_enabled=true
+
+[program:ccda-service]
+command=node /var/www/html/openemr/ccdaservice/serveccda.js
+directory=/var/www/html/openemr/ccdaservice
+autostart=true
+autorestart=true
+priority=15
+startsecs=5
+startretries=3
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -615,6 +637,21 @@ if [ "$ALREADY_CONFIGURED" = false ] && [ -f "$INSTALLER" ]; then
         # Verify configuration was successful
         if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
             echo "✓ OpenEMR configured and ready!"
+            
+            # Enable the C-CDA/CQM service connector so Carecoordination works out of the box
+            echo "Enabling C-CDA service connector..."
+            php -r "
+                require '${OPENEMR_WEB_ROOT}/sites/default/sqlconf.php';
+                \$conn = mysqli_connect(\$host, \$login, \$pass, \$dbase, (int)\$port);
+                if (\$conn) {
+                    // Enable C-CDA alt service (the Node.js CCDA/CQM service managed by supervisord)
+                    mysqli_query(\$conn, \"INSERT INTO globals (gl_name, gl_index, gl_value) VALUES ('ccda_alt_service_enable', 0, '3') ON DUPLICATE KEY UPDATE gl_value='3'\");
+                    echo '✓ C-CDA service connector enabled' . PHP_EOL;
+                    mysqli_close(\$conn);
+                } else {
+                    echo '⚠ Could not enable C-CDA connector: ' . mysqli_connect_error() . PHP_EOL;
+                }
+            " 2>&1 || echo "⚠ C-CDA connector setup had issues"
         else
             echo "⚠ Configuration may not be complete - manual setup may be required"
         fi
@@ -628,7 +665,7 @@ else
     echo "  Visit the web interface to complete setup"
 fi
 
-# Start supervisor (manages nginx + PHP-FPM)
+# Start supervisor (manages nginx + PHP-FPM + CCDA/CQM service)
 echo "Starting services via supervisord..."
 exec /usr/bin/supervisord -c /etc/supervisord.conf
 ENTRYPOINT
