@@ -1,28 +1,28 @@
-# OpenEMR Container - CentOS 9 Stream with Remi PHP 8.4
+# OpenEMR Container - CentOS 10 Stream with Remi PHP 8.5
 # Multi-stage build for optimized final image
 # Runs nginx + PHP-FPM in single container with supervisord
 
 # ============================================================================
 # Stage 1: Builder - Download and prepare OpenEMR
 # ============================================================================
-FROM quay.io/centos/centos:stream9 AS builder
+FROM quay.io/centos/centos:stream10 AS builder
 
 # OpenEMR version
-ARG OPENEMR_VERSION=7.0.4
+ARG OPENEMR_VERSION=8.0.0
 
 # Enable EPEL and CRB repositories for additional packages
 RUN dnf install -y epel-release \
     && dnf config-manager --set-enabled crb \
     && dnf clean all
 
-# Install Remi's repository for PHP 8.4
+# Install Remi's repository for PHP 8.5
 RUN dnf install -y \
-    https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
+    https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
     && dnf clean all
 
-# Enable Remi's PHP 8.4 repository
+# Enable Remi's PHP 8.5 repository
 RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.4 -y
+    && dnf module enable php:remi-8.5 -y
 
 # Install build dependencies and tools
 RUN dnf install -y \
@@ -40,7 +40,7 @@ RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local
 
 # Clone OpenEMR from GitHub (shallow clone of specific tag)
 WORKDIR /tmp
-RUN git clone https://github.com/openemr/openemr.git --branch v7_0_4 --depth 1
+RUN git clone https://github.com/openemr/openemr.git --branch v8_0_0 --depth 1
 
 # Install PHP dependencies with Composer
 WORKDIR /tmp/openemr
@@ -61,22 +61,22 @@ RUN test -f /tmp/openemr/contrib/util/installScripts/InstallerAuto.php \
 # ============================================================================
 # Stage 2: Runtime - Build final container
 # ============================================================================
-FROM quay.io/centos/centos:stream9
+FROM quay.io/centos/centos:stream10
 
 LABEL maintainer="Ryan Nix <ryan_nix>" \
       description="OpenEMR on CentOS 9 Stream - OpenShift Ready" \
-      version="7.0.4" \
+      version="8.0.0" \
       io.k8s.description="OpenEMR Electronic Medical Records System" \
       io.openshift.tags="openemr,healthcare,php,medical" \
       io.openshift.expose-services="8080:http" \
       app.openshift.io/runtime=php
 
 # Environment variables
-ENV OPENEMR_VERSION=7.0.4 \
+ENV OPENEMR_VERSION=8.0.0 \
     OPENEMR_WEB_ROOT=/var/www/html/openemr \
     PHP_FPM_PORT=9000 \
     NGINX_PORT=8080 \
-    PHP_VERSION=8.4
+    PHP_VERSION=8.5
 
 # Enable EPEL and CRB repositories
 RUN dnf install -y epel-release \
@@ -86,19 +86,19 @@ RUN dnf install -y epel-release \
 # Update all packages to get security patches
 RUN dnf upgrade -y && dnf clean all
 
-# Install Remi's repository for PHP 8.4
+# Install Remi's repository for PHP 8.5
 RUN dnf install -y \
-    https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
+    https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
     && dnf clean all
 
-# Enable Remi's PHP 8.4 repository and reset PHP module
+# Enable Remi's PHP 8.5 repository and reset PHP module
 RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.4 -y
+    && dnf module enable php:remi-8.5 -y
 
 # Install nginx
 RUN dnf install -y nginx && dnf clean all
 
-# Install PHP 8.4 and all required modules for OpenEMR from Remi's repo
+# Install PHP 8.5 and all required modules for OpenEMR from Remi's repo
 RUN dnf install -y \
     # PHP Core
     php \
@@ -135,9 +135,9 @@ RUN dnf install -y \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# Install Node.js 22 LTS from AppStream (required for OpenEMR frontend build)
-RUN dnf module enable nodejs:22 -y \
-    && dnf install -y nodejs npm \
+# Install Node.js 22 (required for OpenEMR frontend build)
+# Note: CentOS Stream 10 uses direct package installation, not module streams
+RUN dnf install -y nodejs22 npm \
     && dnf clean all \
     && node --version && npm --version
 

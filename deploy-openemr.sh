@@ -3,7 +3,7 @@
 ##############################################################################
 # OpenEMR on OpenShift Developer Sandbox - Deployment Script
 # 
-# This script deploys OpenEMR 7.0.4 with MariaDB on OpenShift Developer Sandbox
+# This script deploys OpenEMR 8.0.0 with MariaDB on OpenShift Developer Sandbox
 # Based on the nextcloud-simple-custom deployment pattern
 #
 # Note: Developer Sandbox uses AWS EBS storage (RWO only), so OpenEMR runs
@@ -467,7 +467,7 @@ metadata:
     app.kubernetes.io/component: application
     app.kubernetes.io/part-of: openemr
     app.kubernetes.io/runtime: php
-    app.kubernetes.io/version: "7.0.4"
+    app.kubernetes.io/version: "8.0.0"
     app.kubernetes.io/managed-by: kubectl
   annotations:
     app.openshift.io/runtime: php
@@ -484,7 +484,7 @@ spec:
         app.kubernetes.io/component: application
         app.kubernetes.io/part-of: openemr
         app.kubernetes.io/runtime: php
-        app.kubernetes.io/version: "7.0.4"
+        app.kubernetes.io/version: "8.0.0"
     spec:
       containers:
       - name: openemr

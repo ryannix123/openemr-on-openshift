@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       openemr_version:
-        description: 'OpenEMR version to build (e.g., 7.0.4). Leave empty for latest.'
+        description: 'OpenEMR version to build (e.g., 8.0.0). Leave empty for latest.'
         required: false
         default: ''
       force_rebuild:
@@ -40,7 +40,7 @@ on:
       - 'Containerfile'
       - 'configs/**'
       - 'scripts/**'
-      - '.github/workflows/build-openemr.yml'
+      - '.github/workflows/build-image.yml'
 
 env:
   REGISTRY: quay.io
