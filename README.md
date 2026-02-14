@@ -1,10 +1,34 @@
 # OpenEMR on OpenShift Developer Sandbox
 
+[![OpenEMR Version](https://img.shields.io/badge/OpenEMR-8.0.0-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE0IDJINmEyIDIgMCAwIDAtMiAydjE2YTIgMiAwIDAgMCAyIDJoMTJhMiAyIDAgMCAwIDItMlY4eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE0IDIgMTQgOCAyMCA4Ij48L3BvbHlsaW5lPjxsaW5lIHgxPSIxNiIgeTE9IjEzIiB4Mj0iOCIgeTI9IjEzIj48L2xpbmU+PGxpbmUgeDE9IjE2IiB5MT0iMTciIHgyPSI4IiB5Mj0iMTciPjwvbGluZT48cG9seWxpbmUgcG9pbnRzPSIxMCA5IDkgOSA4IDkiPjwvcG9seWxpbmU+PC9zdmc+)](https://www.open-emr.org/)
+[![PHP Version](https://img.shields.io/badge/PHP-8.5-777BB4?style=flat-square&logo=php&logoColor=white)](https://www.php.net/)
+[![MariaDB Version](https://img.shields.io/badge/MariaDB-11.8-003545?style=flat-square&logo=mariadb&logoColor=white)](https://mariadb.org/)
+[![Redis Version](https://img.shields.io/badge/Redis-8-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io/)
+[![CentOS Stream](https://img.shields.io/badge/CentOS%20Stream-10-262577?style=flat-square&logo=centos&logoColor=white)](https://www.centos.org/centos-stream/)
+[![Container Registry](https://img.shields.io/badge/Registry-Quay.io-40B4E5?style=flat-square&logo=docker&logoColor=white)](https://quay.io/repository/ryan_nix/openemr-openshift)
+[![License](https://img.shields.io/badge/License-GPL%20v3-green?style=flat-square&logo=gnu&logoColor=white)](LICENSE)
+[![ONC Certified](https://img.shields.io/badge/ONC-Certified-success?style=flat-square&logo=check-circle&logoColor=white)](https://chpl.healthit.gov/#/listing/10938)
+[![Build and Push OpenEMR](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml/badge.svg)](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml)
+
 Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift Developer Sandbox using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository.
 
 ## Overview
 
-This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift Developer Sandbox. It includes:
+This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift Developer Sandbox.
+
+### 🚀 Technology Stack
+
+| Component | Version | Purpose |
+|-----------|---------|---------|
+| **OpenEMR** | 8.0.0 | Electronic Medical Records System |
+| **PHP** | 8.5 | Runtime (Remi's Repository) |
+| **MariaDB** | 11.8 | Database Backend |
+| **Redis** | 8 Alpine | Session Storage & Cache |
+| **nginx** | 1.26 | Web Server |
+| **CentOS Stream** | 10 | Base Container OS |
+| **Node.js** | 22 LTS | Frontend Build (build-time only) |
+
+### ✨ Key Features
 
 - **Custom OpenEMR Container**: Built on CentOS 10 Stream with Remi's PHP 8.5
 - **Redis Session Storage**: Redis 8 Alpine for improved performance and scalability
@@ -13,6 +37,8 @@ This project provides a complete containerized deployment of OpenEMR (Open-sourc
 - **OpenShift Native**: Designed for OpenShift SCCs and security constraints
 - **Production Ready**: Includes health checks, resource limits, and monitoring
 - **HIPAA Considerations**: Encrypted transport, audit logging capabilities
+- **Auto-Configuration**: Zero-touch deployment with automated setup
+- **US Core 8.0 / USCDI v5**: Latest FHIR interoperability standards
 
 **Note**: This deployment is configured for OpenShift Developer Sandbox which uses AWS EBS storage (ReadWriteOnce only). OpenEMR runs as a single replica, suitable for development, demo, and small practice environments.
 
@@ -86,7 +112,7 @@ Whether you're a solo practitioner, a community health center, or a large health
 
 ### OpenEMR Container
 - **Base**: CentOS 10 Stream
-- **PHP**: 8.4 (from Remi's repository)
+- **PHP**: 8.5 (from Remi's repository)
 - **Web Server**: nginx + PHP-FPM (via supervisord)
 - **OpenEMR**: 8.0.0
 - **Session Storage**: Redis (tcp://redis:6379)
