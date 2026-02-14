@@ -81,7 +81,7 @@ jobs:
           echo "### 📦 Build Version: ${VERSION}" >> $GITHUB_STEP_SUMMARY
 
       # ─────────────────────────────────────────────────────────────────────────
-      # Check if image already exists in registry (skip if force rebuild)
+      # Check if image already exists in registry (skip if force or scheduled)
       # ─────────────────────────────────────────────────────────────────────────
       - name: Check if image exists in registry
         id: check
@@ -89,8 +89,9 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           FORCE="${{ inputs.force_rebuild }}"
           
-          if [ "$FORCE" = "true" ]; then
-            echo "Force rebuild requested - skipping existence check"
+          # Always rebuild on schedule to pick up base image security updates
+          if [ "$FORCE" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Force/scheduled rebuild - skipping existence check"
             echo "exists=false" >> $GITHUB_OUTPUT
             exit 0
           fi
@@ -171,6 +172,8 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         run: |
           echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Images pushed:**" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
