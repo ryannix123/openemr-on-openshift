@@ -1,0 +1,10 @@
+# Default deny-all policy for the openemr namespace.
+# No pod can receive traffic unless explicitly allowed by another policy.
+# This is the foundation of zero-trust: deny by default, allow by exception.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: openemr
+spec:
+  {}  # Empty spec = deny all traffic to all workloads in the namespace

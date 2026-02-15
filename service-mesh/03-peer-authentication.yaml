@@ -1,0 +1,11 @@
+# Enforce strict mTLS for all services in the openemr namespace.
+# Every connection between pods must present a valid mesh certificate.
+# Plaintext connections from non-meshed pods will be rejected.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: openemr
+spec:
+  mtls:
+    mode: STRICT

@@ -1,0 +1,43 @@
+# Sidecar resource limits the Envoy proxy's visibility to only the services
+# each pod actually needs. This reduces memory usage and tightens security
+# by preventing service discovery of unrelated workloads in the mesh.
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: openemr-sidecar
+  namespace: openemr
+spec:
+  workloadSelector:
+    labels:
+      app: openemr
+  egress:
+    - hosts:
+        - "./mariadb.openemr.svc.cluster.local"
+        - "./redis.openemr.svc.cluster.local"
+        - "istio-system/*"
+---
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: mariadb-sidecar
+  namespace: openemr
+spec:
+  workloadSelector:
+    labels:
+      app: mariadb
+  egress:
+    - hosts:
+        - "istio-system/*"
+---
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: redis-sidecar
+  namespace: openemr
+spec:
+  workloadSelector:
+    labels:
+      app.kubernetes.io/name: redis
+  egress:
+    - hosts:
+        - "istio-system/*"

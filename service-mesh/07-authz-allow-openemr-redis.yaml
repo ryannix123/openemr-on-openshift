@@ -1,0 +1,21 @@
+# Allow only the OpenEMR pod to connect to Redis for session storage.
+# Prevents any other workload from reading or flushing session data.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-openemr-to-redis
+  namespace: openemr
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/openemr/sa/default"
+      to:
+        - operation:
+            ports:
+              - "6379"

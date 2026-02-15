@@ -1,0 +1,75 @@
+# EgressFirewall restricts what external destinations pods can reach.
+# This is critical for healthcare workloads: if a pod is compromised,
+# the attacker cannot exfiltrate PHI or establish C2 channels.
+#
+# Requires OVN-Kubernetes CNI (default on OpenShift 4.12+).
+# Only one EgressFirewall object is allowed per namespace.
+#
+# Customize the Allow rules below for your environment:
+# - Add FHIR endpoints, Direct messaging gateways, SMTP relays, etc.
+# - Remove rules you don't need (e.g., Quay.io if not pulling images at runtime)
+apiVersion: k8s.ovn.org/v1
+kind: EgressFirewall
+metadata:
+  name: openemr-egress
+  namespace: openemr
+spec:
+  egress:
+    # ─── ALLOW: Container registries (image pulls) ───
+    - type: Allow
+      to:
+        dnsName: "quay.io"
+    - type: Allow
+      to:
+        dnsName: "*.quay.io"
+    - type: Allow
+      to:
+        dnsName: "docker.io"
+    - type: Allow
+      to:
+        dnsName: "*.docker.io"
+    - type: Allow
+      to:
+        dnsName: "registry-1.docker.io"
+
+    # ─── ALLOW: OpenEMR project resources ───
+    - type: Allow
+      to:
+        dnsName: "www.open-emr.org"
+    - type: Allow
+      to:
+        dnsName: "community.open-emr.org"
+
+    # ─── ALLOW: FHIR / Health Information Exchange ───
+    # Uncomment and customize for your HIE endpoints:
+    # - type: Allow
+    #   to:
+    #     dnsName: "fhir.yourhie.org"
+    # - type: Allow
+    #   to:
+    #     dnsName: "direct.yourhie.org"
+
+    # ─── ALLOW: SMTP (email notifications) ───
+    # Uncomment and set your SMTP relay:
+    # - type: Allow
+    #   to:
+    #     dnsName: "smtp.example.com"
+    #   port:
+    #     protocol: TCP
+    #     port: 587
+
+    # ─── ALLOW: NTP (time synchronization) ───
+    - type: Allow
+      to:
+        cidrSelector: 0.0.0.0/0
+      port:
+        protocol: UDP
+        port: 123
+
+    # ─── DENY: Everything else ───
+    # This is the critical rule. Any outbound connection not matching
+    # an Allow rule above is blocked. This prevents data exfiltration,
+    # C2 callbacks, and lateral movement to external targets.
+    - type: Deny
+      to:
+        cidrSelector: 0.0.0.0/0

@@ -1,0 +1,31 @@
+# Allow the Istio ingress gateway (or OpenShift Router) to reach OpenEMR.
+# This is the only externally-accessible service in the namespace.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ingress-to-openemr
+  namespace: openemr
+spec:
+  selector:
+    matchLabels:
+      app: openemr
+  action: ALLOW
+  rules:
+    # Allow traffic from the mesh ingress gateway
+    - from:
+        - source:
+            namespaces:
+              - istio-system
+      to:
+        - operation:
+            ports:
+              - "8080"
+    # Allow traffic from the OpenShift router (non-meshed ingress)
+    - from:
+        - source:
+            namespaces:
+              - openshift-ingress
+      to:
+        - operation:
+            ports:
+              - "8080"
