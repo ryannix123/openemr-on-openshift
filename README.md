@@ -471,7 +471,7 @@ OpenShift makes it easy to restrict access to your OpenEMR instance by IP addres
 ### Allow Only Specific IPs
 
 ```bash
-# Allow access only from your office and home IPs. Not a true firewall, but it restricts access."
+# Allow access only allowed IPs. Not a true firewall, but it restricts access."
 oc annotate route openemr \
   haproxy.router.openshift.io/ip_whitelist="203.0.113.50 198.51.100.0/24"
 ```
