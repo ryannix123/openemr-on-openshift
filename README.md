@@ -466,12 +466,12 @@ For production healthcare deployments:
 
 ## Securing Access with IP Whitelisting
 
-OpenShift makes it easy to restrict access to your OpenEMR instance by IP address using route annotations — no firewall rules or external load balancer configuration needed.
+OpenShift makes it easy to restrict access to your OpenEMR instance by IP address using route annotations — no firewall rules or external load balancer configuration needed. Not a true firewall, but it restricts access."
 
 ### Allow Only Specific IPs
 
 ```bash
-# Allow access only allowed IPs. Not a true firewall, but it restricts access."
+# Allow access only allowed IPs.
 oc annotate route openemr \
   haproxy.router.openshift.io/ip_whitelist="203.0.113.50 198.51.100.0/24"
 ```
