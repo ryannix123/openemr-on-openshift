@@ -464,6 +464,41 @@ For production healthcare deployments:
      pod-security.kubernetes.io/warn=restricted
    ```
 
+## Securing Access with IP Whitelisting
+
+OpenShift makes it easy to restrict access to your OpenEMR instance by IP address using route annotations — no firewall rules or external load balancer configuration needed.
+
+### Allow Only Specific IPs
+
+```bash
+# Allow access only from your office and home IPs
+oc annotate route openemr \
+  haproxy.router.openshift.io/ip_whitelist="203.0.113.50 198.51.100.0/24"
+```
+
+### Common Use Cases
+
+| Scenario | Annotation Value |
+|----------|-----------------|
+| Single IP | `203.0.113.50` |
+| Multiple IPs | `203.0.113.50 198.51.100.25` |
+| CIDR range | `10.0.0.0/8` |
+| Mixed | `203.0.113.50 192.168.1.0/24 10.0.0.0/8` |
+
+### Remove Restriction
+
+```bash
+oc annotate route openemr haproxy.router.openshift.io/ip_whitelist-
+```
+
+### Verify Configuration
+
+```bash
+oc get route openemr -o jsonpath='{.metadata.annotations.haproxy\.router\.openshift\.io/ip_whitelist}'
+```
+
+This is especially useful for locking down a demo or development instance to only your team's IPs without any infrastructure changes. For healthcare environments handling PHI, IP whitelisting adds an important layer of access control alongside TLS and authentication.
+
 ## Maintenance
 
 ### Backup
