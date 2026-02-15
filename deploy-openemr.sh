@@ -744,7 +744,7 @@ cleanup() {
     # Delete PVCs
     print_warning "Deleting PVCs (this will DELETE ALL DATA!)..."
     print_info "Deleting PersistentVolumeClaims..."
-    oc delete pvc openemr-documents mariadb-data redis-data --ignore-not-found
+    oc delete pvc openemr-sites mariadb-data --ignore-not-found
     
     print_success "Cleanup complete! All resources deleted."
 }

@@ -138,6 +138,7 @@ RUN dnf install -y \
     # Utilities
     unzip \
     wget \
+    which \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -434,6 +435,21 @@ stderr_events_enabled=true
 [program:ccda-service]
 command=node /var/www/html/openemr/ccdaservice/serveccda.js
 directory=/var/www/html/openemr/ccdaservice
+autostart=true
+autorestart=true
+priority=15
+startsecs=5
+startretries=3
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+stdout_events_enabled=true
+stderr_events_enabled=true
+
+[program:cqm-service]
+command=node /var/www/html/openemr/ccdaservice/node_modules/oe-cqm-service/server.js
+directory=/var/www/html/openemr/ccdaservice/node_modules/oe-cqm-service
 autostart=true
 autorestart=true
 priority=15
