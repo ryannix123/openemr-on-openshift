@@ -70,7 +70,7 @@ Whether you're a solo practitioner, a community health center, or a large health
 ```
 ┌─────────────────────────────────────────────┐
 │          OpenShift Route (HTTPS)            │
-│    openemr-openemr.apps.sandbox.xxx.xxx     │
+│    openemr.apps.project-namespace.apps.rm3.7wse.p1.openshiftapps.com    │
 └─────────────────┬───────────────────────────┘
                   │
 ┌─────────────────▼───────────────────────────┐
@@ -157,11 +157,12 @@ Whether you're a solo practitioner, a community health center, or a large health
 - Basic understanding of Kubernetes/OpenShift concepts
 
 **Developer Sandbox Limitations to be aware of:**
-- Projects expire after 30 days of inactivity
+- Access to Sandbox must renewed every 30 days
 - Storage limited to ~40GB total per namespace
 - Resource quotas: Limited CPU/memory per namespace
 - No cluster-admin access
 - Single replica deployments recommended for persistent storage
+- Sandbox is not for production deployments.
 
 ## Quick Start
 
