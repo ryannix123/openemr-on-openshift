@@ -511,13 +511,6 @@ openemr-openshift/
 ├── .github/
 │   └── workflows/
 │       └── build-image.yml               # CI/CD: build & push to Quay.io
-└── manifests/                            # (Optional) Individual YAML files
-    ├── deployment.yaml
-    ├── service.yaml
-    ├── route.yaml
-    └── mariadb/
-        ├── deployment.yaml
-        └── service.yaml
 ```
 
 ## Contributing
@@ -537,10 +530,6 @@ Contributions are welcome! Areas for improvement:
 - [OpenEMR Documentation](https://www.open-emr.org/wiki/index.php/OpenEMR_Wiki_Home_Page)
 - [Red Hat OpenShift Documentation](https://docs.openshift.com/)
 - [OpenShift Data Foundation](https://www.redhat.com/en/technologies/cloud-computing/openshift-data-foundation)
-
-## License
-
-This project follows OpenEMR's licensing. OpenEMR is licensed under GPL v3.
 
 ## Author
 
