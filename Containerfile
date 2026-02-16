@@ -614,6 +614,40 @@ db_has_tables() {
     " 2>/dev/null
 }
 
+# ─── Helper: Check if install is COMPLETE (not just tables created) ───
+# The installer creates tables first, then seeds globals/data. If the pod
+# restarts mid-install, tables exist but globals is empty = broken state.
+db_install_complete() {
+    php -r "
+        \$c = @mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}');
+        if (!\$c) exit(1);
+        \$r = mysqli_query(\$c, \"SELECT COUNT(*) as cnt FROM globals\");
+        if (!\$r) exit(1);
+        \$row = mysqli_fetch_assoc(\$r);
+        // A complete install has 300+ globals rows; partial has 0-5
+        exit(\$row['cnt'] > 100 ? 0 : 1);
+    " 2>/dev/null
+}
+
+# ─── Helper: Drop all tables for clean re-install ───
+# Used when a partial install left tables but no seed data
+db_drop_all_tables() {
+    echo "Dropping all tables from incomplete install..."
+    php -r "
+        \$c = @mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}');
+        if (!\$c) { echo 'Could not connect to drop tables' . PHP_EOL; exit(1); }
+        mysqli_query(\$c, 'SET FOREIGN_KEY_CHECKS = 0');
+        \$r = mysqli_query(\$c, \"SELECT table_name FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}'\");
+        \$count = 0;
+        while (\$row = mysqli_fetch_assoc(\$r)) {
+            mysqli_query(\$c, 'DROP TABLE IF EXISTS \`' . \$row['table_name'] . '\`');
+            \$count++;
+        }
+        mysqli_query(\$c, 'SET FOREIGN_KEY_CHECKS = 1');
+        echo \"Dropped \$count tables\" . PHP_EOL;
+    " 2>/dev/null
+}
+
 # ─── Helper: Enable C-CDA/CQM connector ───
 enable_ccda_connector() {
     echo "Enabling C-CDA service connector..."
@@ -690,14 +724,48 @@ elif [ -f "$INSTALLER" ]; then
         
         # Check if this is a retry (tables already exist from a previous partial install)
         if db_has_tables; then
-            echo "Database already has OpenEMR tables (previous partial install detected)"
-            echo "Skipping InstallerAuto.php — fixing configuration instead..."
-            
-            # Set $config = 1 so OpenEMR knows it's configured
-            sed -i "s|\\\$config = 0.*|\\\$config = 1; ////////////|" "$SQLCONF"
-            echo "✓ Configuration status set to CONFIGURED"
-            
-            enable_ccda_connector
+            if db_install_complete; then
+                echo "Database has complete OpenEMR install (previous run succeeded)"
+                echo "Skipping InstallerAuto.php — fixing configuration only..."
+                sed -i "s|\\\$config = 0.*|\\\$config = 1; ////////////|" "$SQLCONF"
+                echo "✓ Configuration status set to CONFIGURED"
+                enable_ccda_connector
+            else
+                echo "⚠ Incomplete install detected (tables exist but globals not seeded)"
+                echo "  Cleaning up and re-running installer..."
+                db_drop_all_tables
+                
+                # Reset sqlconf.php to unconfigured state for clean install
+                sed -i "s|\\\$config = 1.*|\\\$config = 0; ////////////|" "$SQLCONF"
+                
+                echo "Running InstallerAuto.php (no_root_db_access mode)..."
+                cd ${OPENEMR_WEB_ROOT}
+                export OPENEMR_ENABLE_INSTALLER_AUTO=1
+                
+                php -f contrib/util/installScripts/InstallerAuto.php \
+                    no_root_db_access=1 \
+                    server="${MYSQL_HOST}" \
+                    port="${MYSQL_PORT}" \
+                    login="${MYSQL_USER}" \
+                    pass="${MYSQL_PASS}" \
+                    dbname="${MYSQL_DATABASE}" \
+                    iuser="${OE_USER}" \
+                    iuserpass="${OE_PASS}" \
+                    iuname="Administrator" \
+                    2>&1 \
+                    && echo "✓ Auto-configuration completed successfully!" \
+                    || echo "⚠ Auto-configuration had issues, check logs above"
+                
+                # Ensure credentials are correct after installer
+                update_sqlconf_credentials
+                
+                if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
+                    echo "✓ OpenEMR configured and ready!"
+                    enable_ccda_connector
+                else
+                    echo "⚠ Configuration may not be complete - manual setup may be required"
+                fi
+            fi
         else
             # Fresh install — run InstallerAuto.php
             echo "Running InstallerAuto.php (no_root_db_access mode)..."
@@ -723,15 +791,16 @@ elif [ -f "$INSTALLER" ]; then
             if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
                 echo "✓ OpenEMR configured and ready!"
                 enable_ccda_connector
-            elif db_has_tables; then
-                # Installer created tables but didn't finish updating sqlconf.php
-                echo "⚠ Installer didn't complete cleanly — recovering..."
+            elif db_has_tables && db_install_complete; then
+                # Installer created tables and seeded data but didn't update sqlconf.php
+                echo "⚠ Installer didn't update sqlconf.php — recovering..."
                 update_sqlconf_credentials
                 sed -i "s|\\\$config = 0.*|\\\$config = 1; ////////////|" "$SQLCONF"
                 echo "✓ Configuration recovered"
                 enable_ccda_connector
             else
                 echo "⚠ Configuration may not be complete - manual setup may be required"
+                echo "  Visit the web interface to complete setup"
             fi
         fi
         
