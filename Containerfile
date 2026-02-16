@@ -579,6 +579,57 @@ echo "Checking configuration status..."
 echo "  - sqlconf.php exists: $(test -f "$SQLCONF" && echo 'yes' || echo 'no')"
 echo "  - InstallerAuto.php exists: $(test -f "$INSTALLER" && echo 'yes' || echo 'no')"
 
+# Set database credentials from environment (with defaults)
+export MYSQL_HOST=${MYSQL_HOST:-mariadb}
+export MYSQL_PORT=${MYSQL_PORT:-3306}
+export MYSQL_DATABASE=${MYSQL_DATABASE:-openemr}
+export MYSQL_USER=${MYSQL_USER:-openemr}
+export MYSQL_PASS=${MYSQL_PASS:-openemr}
+export OE_USER=${OE_USER:-admin}
+export OE_PASS=${OE_PASS:-pass}
+
+# ─── Helper: Write real credentials into sqlconf.php ───
+# This ensures sqlconf.php always has the correct credentials from the
+# environment, regardless of whether InstallerAuto.php succeeds or fails.
+update_sqlconf_credentials() {
+    if [ -f "$SQLCONF" ]; then
+        echo "Syncing sqlconf.php with environment credentials..."
+        sed -i "s|\\\$host[[:space:]]*=.*|\\\$host   = '${MYSQL_HOST}';|" "$SQLCONF"
+        sed -i "s|\\\$port[[:space:]]*=.*|\\\$port   = '${MYSQL_PORT}';|" "$SQLCONF"
+        sed -i "s|\\\$login[[:space:]]*=.*|\\\$login  = '${MYSQL_USER}';|" "$SQLCONF"
+        sed -i "s|\\\$pass[[:space:]]*=.*|\\\$pass   = '${MYSQL_PASS}';|" "$SQLCONF"
+        sed -i "s|\\\$dbase[[:space:]]*=.*|\\\$dbase  = '${MYSQL_DATABASE}';|" "$SQLCONF"
+        echo "✓ sqlconf.php credentials updated"
+    fi
+}
+
+# ─── Helper: Check if database has OpenEMR tables ───
+db_has_tables() {
+    php -r "
+        \$c = @mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}');
+        if (!\$c) exit(1);
+        \$r = mysqli_query(\$c, \"SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}'\");
+        \$row = mysqli_fetch_assoc(\$r);
+        exit(\$row['cnt'] > 10 ? 0 : 1);
+    " 2>/dev/null
+}
+
+# ─── Helper: Enable C-CDA/CQM connector ───
+enable_ccda_connector() {
+    echo "Enabling C-CDA service connector..."
+    php -r "
+        require '${OPENEMR_WEB_ROOT}/sites/default/sqlconf.php';
+        \$conn = mysqli_connect(\$host, \$login, \$pass, \$dbase, (int)\$port);
+        if (\$conn) {
+            mysqli_query(\$conn, \"INSERT INTO globals (gl_name, gl_index, gl_value) VALUES ('ccda_alt_service_enable', 0, '3') ON DUPLICATE KEY UPDATE gl_value='3'\");
+            echo '✓ C-CDA service connector enabled' . PHP_EOL;
+            mysqli_close(\$conn);
+        } else {
+            echo '⚠ Could not enable C-CDA connector: ' . mysqli_connect_error() . PHP_EOL;
+        }
+    " 2>&1 || echo "⚠ C-CDA connector setup had issues"
+}
+
 # Check if already configured ($config = 1 means configured)
 ALREADY_CONFIGURED=false
 if [ -f "$SQLCONF" ] && grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
@@ -588,20 +639,25 @@ else
     echo "  - Configuration status: NOT CONFIGURED"
 fi
 
-# Auto-configuration on first run
-if [ "$ALREADY_CONFIGURED" = false ] && [ -f "$INSTALLER" ]; then
+# ─── Case 1: Already configured — sync credentials if needed ───
+if [ "$ALREADY_CONFIGURED" = true ]; then
+    echo "✓ OpenEMR already configured"
+    
+    # Sync credentials in case PVC outlived the secret (redeployment with new password)
+    update_sqlconf_credentials
+    
+    # Verify we can actually connect with these credentials
+    if php -r "mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}') or exit(1);" 2>/dev/null; then
+        echo "✓ Database connection verified"
+    else
+        echo "⚠ Database connection failed — MariaDB may still be starting"
+    fi
+
+# ─── Case 2: Not configured, installer available — run auto-config ───
+elif [ -f "$INSTALLER" ]; then
     echo "=========================================="
     echo "Running OpenEMR Auto-Configuration"
     echo "=========================================="
-    
-    # Set defaults if not provided
-    export MYSQL_HOST=${MYSQL_HOST:-mariadb}
-    export MYSQL_PORT=${MYSQL_PORT:-3306}
-    export MYSQL_DATABASE=${MYSQL_DATABASE:-openemr}
-    export MYSQL_USER=${MYSQL_USER:-openemr}
-    export MYSQL_PASS=${MYSQL_PASS:-openemr}
-    export OE_USER=${OE_USER:-admin}
-    export OE_PASS=${OE_PASS:-pass}
     
     echo "Database connection settings:"
     echo "  - Host: ${MYSQL_HOST}"
@@ -609,6 +665,10 @@ if [ "$ALREADY_CONFIGURED" = false ] && [ -f "$INSTALLER" ]; then
     echo "  - Database: ${MYSQL_DATABASE}"
     echo "  - User: ${MYSQL_USER}"
     echo "  - Admin User: ${OE_USER}"
+    
+    # Write real credentials into sqlconf.php BEFORE running installer
+    # This ensures the app can connect even if the installer fails partway through
+    update_sqlconf_credentials
     
     # Wait for database to be ready
     echo "Waiting for database at ${MYSQL_HOST}..."
@@ -628,54 +688,57 @@ if [ "$ALREADY_CONFIGURED" = false ] && [ -f "$INSTALLER" ]; then
     if [ $counter -le 30 ]; then
         echo "✓ Database connection successful"
         
-        # Run InstallerAuto.php with no_root_db_access mode
-        # This uses the pre-created database and user from MariaDB container
-        echo "Running InstallerAuto.php (no_root_db_access mode)..."
-        cd ${OPENEMR_WEB_ROOT}
-        
-        # Enable the installer script
-        export OPENEMR_ENABLE_INSTALLER_AUTO=1
-        
-        php -f contrib/util/installScripts/InstallerAuto.php \
-            no_root_db_access=1 \
-            server="${MYSQL_HOST}" \
-            port="${MYSQL_PORT}" \
-            login="${MYSQL_USER}" \
-            pass="${MYSQL_PASS}" \
-            dbname="${MYSQL_DATABASE}" \
-            iuser="${OE_USER}" \
-            iuserpass="${OE_PASS}" \
-            iuname="Administrator" \
-            2>&1 \
-            && echo "✓ Auto-configuration completed successfully!" \
-            || echo "⚠ Auto-configuration had issues, check logs above"
-        
-        # Verify configuration was successful
-        if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
-            echo "✓ OpenEMR configured and ready!"
+        # Check if this is a retry (tables already exist from a previous partial install)
+        if db_has_tables; then
+            echo "Database already has OpenEMR tables (previous partial install detected)"
+            echo "Skipping InstallerAuto.php — fixing configuration instead..."
             
-            # Enable the C-CDA/CQM service connector so Carecoordination works out of the box
-            echo "Enabling C-CDA service connector..."
-            php -r "
-                require '${OPENEMR_WEB_ROOT}/sites/default/sqlconf.php';
-                \$conn = mysqli_connect(\$host, \$login, \$pass, \$dbase, (int)\$port);
-                if (\$conn) {
-                    // Enable C-CDA alt service (the Node.js CCDA/CQM service managed by supervisord)
-                    mysqli_query(\$conn, \"INSERT INTO globals (gl_name, gl_index, gl_value) VALUES ('ccda_alt_service_enable', 0, '3') ON DUPLICATE KEY UPDATE gl_value='3'\");
-                    echo '✓ C-CDA service connector enabled' . PHP_EOL;
-                    mysqli_close(\$conn);
-                } else {
-                    echo '⚠ Could not enable C-CDA connector: ' . mysqli_connect_error() . PHP_EOL;
-                }
-            " 2>&1 || echo "⚠ C-CDA connector setup had issues"
+            # Set $config = 1 so OpenEMR knows it's configured
+            sed -i "s|\\\$config = 0.*|\\\$config = 1; ////////////|" "$SQLCONF"
+            echo "✓ Configuration status set to CONFIGURED"
+            
+            enable_ccda_connector
         else
-            echo "⚠ Configuration may not be complete - manual setup may be required"
+            # Fresh install — run InstallerAuto.php
+            echo "Running InstallerAuto.php (no_root_db_access mode)..."
+            cd ${OPENEMR_WEB_ROOT}
+            
+            export OPENEMR_ENABLE_INSTALLER_AUTO=1
+            
+            php -f contrib/util/installScripts/InstallerAuto.php \
+                no_root_db_access=1 \
+                server="${MYSQL_HOST}" \
+                port="${MYSQL_PORT}" \
+                login="${MYSQL_USER}" \
+                pass="${MYSQL_PASS}" \
+                dbname="${MYSQL_DATABASE}" \
+                iuser="${OE_USER}" \
+                iuserpass="${OE_PASS}" \
+                iuname="Administrator" \
+                2>&1 \
+                && echo "✓ Auto-configuration completed successfully!" \
+                || echo "⚠ Auto-configuration had issues, check logs above"
+            
+            # Verify and recover
+            if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
+                echo "✓ OpenEMR configured and ready!"
+                enable_ccda_connector
+            elif db_has_tables; then
+                # Installer created tables but didn't finish updating sqlconf.php
+                echo "⚠ Installer didn't complete cleanly — recovering..."
+                update_sqlconf_credentials
+                sed -i "s|\\\$config = 0.*|\\\$config = 1; ////////////|" "$SQLCONF"
+                echo "✓ Configuration recovered"
+                enable_ccda_connector
+            else
+                echo "⚠ Configuration may not be complete - manual setup may be required"
+            fi
         fi
         
         echo "=========================================="
     fi
-elif [ "$ALREADY_CONFIGURED" = true ]; then
-    echo "✓ OpenEMR already configured, skipping auto-configuration"
+
+# ─── Case 3: No installer available ───
 else
     echo "⚠ InstallerAuto.php not found - manual setup required"
     echo "  Visit the web interface to complete setup"
