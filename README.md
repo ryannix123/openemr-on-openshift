@@ -541,7 +541,7 @@ Contributions are welcome! Areas for improvement:
 - [ ] Automated database migrations
 - [ ] Prometheus metrics exporters
 - [ ] Custom Operator
-- [ ] Multi-tenancy support
+- [x] Multi-tenancy support
 
 ## Resources
 
