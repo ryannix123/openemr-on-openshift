@@ -542,7 +542,7 @@ Contributions are welcome! Areas for improvement:
 - [ ] Automated database migrations
 - [ ] Prometheus metrics exporters
 - [ ] Custom Operator
-- [x] Multi-tenancy support (Works out-of-the-box with OpenShift)
+- [x] Secure namespace/multi-tenancy support (Works out-of-the-box with OpenShift)
 
 ## Resources
 
