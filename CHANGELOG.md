@@ -1,5 +1,53 @@
 # OpenEMR Deployment Changelog
 
+## Version 2.1.0 - February 27, 2026
+
+### 🤖 Ansible Deployment Added
+
+Added a platform-agnostic Ansible deployment as an alternative to the existing shell script. This removes the dependency on bash/WSL for Windows users and enables native support on macOS, Linux, and Ansible Automation Platform (AAP) / Tower.
+
+### **New: `ansible/` Directory**
+
+```
+ansible/
+├── deploy-openemr.yml     # Main playbook (deploy / status / cleanup)
+├── vars/
+│   └── main.yml           # All tunables — images, storage, resources, timeouts
+└── README.md              # Ansible-specific documentation
+```
+
+### **Key Capabilities**
+
+- ✅ **Platform agnostic** — runs anywhere Python 3.9+ and `oc` are installed; no bash or WSL required
+- ✅ **Idempotent** — detects existing Secrets and preserves passwords on re-runs
+- ✅ **AAP/Tower compatible** — runs on `localhost` via `kubernetes.core`, no inventory needed
+- ✅ **Manifest export** — writes all 11 YAML resources + `kustomization.yaml` to `./openemr-manifests/` post-deploy
+- ✅ **Externalized config** — all tunables (images, storage class, resource limits, timeouts) live in `vars/main.yml`
+- ✅ **Multi-environment ready** — override any var via `-e` or `-e "@vars/prod.yml"`
+
+### **Prerequisites**
+
+```bash
+pip install ansible kubernetes
+ansible-galaxy collection install kubernetes.core
+```
+
+### **Usage**
+
+```bash
+cd ansible/
+ansible-playbook deploy-openemr.yml                                        # Deploy
+ansible-playbook deploy-openemr.yml -e "action=status"                     # Status
+ansible-playbook deploy-openemr.yml -e "action=cleanup"                    # Cleanup
+ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
+```
+
+### **Documentation**
+- ✅ `ansible/README.md` — full Ansible usage and variable reference
+- ✅ Root `README.md` — updated Quick Start with Option A / Option B deployment choice
+
+---
+
 ## Version 2.0.0 - February 13, 2026
 
 ### 🎉 Major Infrastructure Upgrade
@@ -106,8 +154,11 @@ podman push quay.io/ryan_nix/openemr-openshift:8.0.0
 ### **Deploy to OpenShift**
 
 ```bash
-# New deployment
+# Shell script
 ./deploy-openemr.sh
+
+# Ansible (platform-agnostic)
+cd ansible/ && ansible-playbook deploy-openemr.yml
 
 # Or upgrade existing deployment
 oc rollout restart deployment/openemr -n openemr
@@ -242,12 +293,15 @@ oc set image deployment/openemr \
 - ✅ PHP 8.5 runtime
 - ✅ Auto-configuration enabled
 - ✅ Kubernetes standard labels
+- ✅ Ansible playbook deployment
 
 ### **Future Considerations**
 - 📅 **OpenEMR 8.0.1** - Watch for point releases
 - 📅 **PHP 8.6** - Expected November 2026
 - 📅 **CentOS Stream 11** - Follow RHEL 11 development
 - 📅 **MariaDB 12.x** - When stable release available
+- 📅 **Helm chart** - Parameterized chart for multi-environment deploys
+- 📅 **GitOps/ArgoCD** - Declarative continuous deployment
 
 ---
 
@@ -278,6 +332,6 @@ oc set image deployment/openemr \
 
 ---
 
-**Updated**: February 13, 2026  
-**Version**: 2.0.0  
+**Updated**: February 27, 2026  
+**Version**: 2.1.0  
 **Stack**: OpenEMR 8.0.0 + PHP 8.5 + CentOS Stream 10 + MariaDB 11.8 + Redis 8

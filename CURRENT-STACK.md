@@ -83,31 +83,47 @@
 
 ## 🚀 Ready to Deploy!
 
-Your deployment is **100% ready** with all upgrades applied:
+Your deployment is **100% ready** with all upgrades applied.
 
-### **Quick Deploy Commands**
+### **Option A — Shell Script** (Linux, macOS, WSL)
 
 ```bash
 # 1. Build the new container
-cd /path/to/openemr-openshift
 ./build-container.sh
-
-# This will create:
-#   ✓ Base: CentOS Stream 10
-#   ✓ PHP: 8.5 from Remi
-#   ✓ OpenEMR: 8.0.0
-#   ✓ Tags: :8.0.0 and :latest
 
 # 2. Push to Quay.io
 podman push quay.io/ryan_nix/openemr-openshift:latest
 podman push quay.io/ryan_nix/openemr-openshift:8.0.0
 
-# 3. Deploy to OpenShift
+# 3. Deploy
 ./deploy-openemr.sh
 
 # Or upgrade existing deployment:
 oc rollout restart deployment/openemr -n openemr
 ```
+
+### **Option B — Ansible Playbook** (macOS, Linux, Windows — no WSL required)
+
+```bash
+# 1. Install prerequisites (one-time)
+pip install ansible kubernetes
+ansible-galaxy collection install kubernetes.core
+
+# 2. Build and push the container (same as above)
+./build-container.sh
+podman push quay.io/ryan_nix/openemr-openshift:latest
+
+# 3. Deploy
+cd ansible/
+ansible-playbook deploy-openemr.yml
+
+# Common overrides:
+ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
+ansible-playbook deploy-openemr.yml -e "action=status"
+ansible-playbook deploy-openemr.yml -e "action=cleanup"
+```
+
+> See `ansible/vars/main.yml` for all tunables and `ansible/README.md` for full documentation.
 
 ---
 
@@ -121,6 +137,7 @@ oc rollout restart deployment/openemr -n openemr
 | **MariaDB** | 11.8 | 11.8 | ✅ Same (compatible) |
 | **Redis** | 8 Alpine | 8 Alpine | ✅ Same (compatible) |
 | **nginx** | Stream 9 package | Stream 10 package | ✅ Updated |
+| **Ansible deployment** | — | **ansible/** | ✅ Added |
 
 ---
 
@@ -146,6 +163,13 @@ oc rollout restart deployment/openemr -n openemr
 ✅ Enhanced care team management  
 ✅ Improved clinical documentation  
 ✅ Better interoperability  
+
+### **Ansible Playbook**
+✅ No bash or WSL dependency  
+✅ Idempotent — safe to re-run  
+✅ Exports all YAML manifests post-deploy  
+✅ AAP/Tower compatible  
+✅ All config externalized to `vars/main.yml`  
 
 ---
 
@@ -175,17 +199,24 @@ oc logs deployment/openemr -n openemr --tail=50
 
 ---
 
-## 📝 Files Updated
+## 📝 Project Files
 
-All files in `/mnt/user-data/outputs/openemr-openshift/`:
-
-1. ✅ **Containerfile** - Base image, PHP module, all versions
-2. ✅ **deploy-openemr.sh** - Deployment labels and references
-3. ✅ **build-container.sh** - Build script versions
-4. ✅ **README.md** - Documentation updated
-5. ✅ **UPGRADE-TO-8.0.0.md** - Upgrade guide
-6. ✅ **CHANGELOG.md** - Complete change history (NEW!)
-7. ✅ **CURRENT-STACK.md** - This file (NEW!)
+```
+openemr-on-openshift/
+├── Containerfile              # Container build instructions
+├── deploy-openemr.sh          # Shell script deployment (bash/WSL)
+├── build-container.sh         # Container build script
+├── README.md                  # Project documentation
+├── CHANGELOG.md               # Version history
+├── CURRENT-STACK.md           # This file
+├── UPGRADE-TO-8.0.0.md        # Upgrade guide
+├── ansible/                   # Ansible deployment (platform-agnostic)
+│   ├── deploy-openemr.yml     # Main playbook
+│   ├── vars/
+│   │   └── main.yml           # All tunables
+│   └── README.md              # Ansible documentation
+└── manifests/                 # Individual YAML files (reference)
+```
 
 ---
 
@@ -194,13 +225,13 @@ All files in `/mnt/user-data/outputs/openemr-openshift/`:
 1. **Review** the CHANGELOG.md for full details
 2. **Build** the container: `./build-container.sh`
 3. **Push** to registry: `podman push ...`
-4. **Deploy** to OpenShift: `./deploy-openemr.sh`
+4. **Deploy** via shell script or Ansible playbook
 5. **Verify** using commands above
 6. **Test** OpenEMR admin interface
 
 ---
 
 **Status**: ✅ READY TO DEPLOY  
-**Last Updated**: February 13, 2026  
+**Last Updated**: February 27, 2026  
 **Maintained By**: Ryan Nix  
-**Registry**: quay.io/ryan_nix/openemr-openshift  
+**Registry**: quay.io/ryan_nix/openemr-openshift
