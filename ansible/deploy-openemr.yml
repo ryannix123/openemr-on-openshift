@@ -1,0 +1,859 @@
+---
+# =============================================================================
+# OpenEMR on OpenShift - Ansible Deployment Playbook
+#
+# Requires: ansible-galaxy collection install kubernetes.core
+#
+# Usage:
+#   ansible-playbook deploy-openemr.yml                        # Deploy
+#   ansible-playbook deploy-openemr.yml -e "action=status"
+#   ansible-playbook deploy-openemr.yml -e "action=cleanup"
+#   ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
+#   ansible-playbook deploy-openemr.yml -e "@vars/custom.yml"  # Custom overrides
+#
+# Author: Ryan Nix <ryan.nix@gmail.com>
+# =============================================================================
+
+- name: OpenEMR on OpenShift
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/main.yml
+
+  # ---------------------------------------------------------------------------
+  # PRE-TASKS: Validate environment
+  # ---------------------------------------------------------------------------
+  pre_tasks:
+    - name: Verify oc CLI is available
+      ansible.builtin.command: which oc
+      register: oc_check
+      changed_when: false
+      failed_when: oc_check.rc != 0
+
+    - name: Verify OpenShift login
+      ansible.builtin.command: oc whoami
+      register: oc_whoami
+      changed_when: false
+      failed_when: oc_whoami.rc != 0
+
+    - name: Display current user and action
+      ansible.builtin.debug:
+        msg:
+          - "Logged in as : {{ oc_whoami.stdout }}"
+          - "Action       : {{ action }}"
+
+    - name: Get current OpenShift namespace
+      ansible.builtin.command: oc project -q
+      register: oc_project
+      changed_when: false
+      failed_when: oc_project.rc != 0
+
+    - name: Set namespace fact
+      ansible.builtin.set_fact:
+        openshift_namespace: "{{ oc_project.stdout | trim }}"
+
+    - name: Display target namespace
+      ansible.builtin.debug:
+        msg: "Target namespace: {{ openshift_namespace }}"
+
+  # ---------------------------------------------------------------------------
+  # TASKS
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # ---- STATUS --------------------------------------------------------------
+    - name: Show deployment status
+      when: action == "status"
+      block:
+        - name: Get pods
+          ansible.builtin.command: oc get pods -l app.kubernetes.io/part-of=openemr -n {{ openshift_namespace }}
+          register: pods_out
+          changed_when: false
+          failed_when: false
+
+        - name: Get services
+          ansible.builtin.command: oc get svc -l app.kubernetes.io/part-of=openemr -n {{ openshift_namespace }}
+          register: svc_out
+          changed_when: false
+          failed_when: false
+
+        - name: Get route
+          ansible.builtin.command: oc get route openemr -n {{ openshift_namespace }}
+          register: route_out
+          changed_when: false
+          failed_when: false
+
+        - name: Get PVCs
+          ansible.builtin.command: oc get pvc -l app.kubernetes.io/part-of=openemr -n {{ openshift_namespace }}
+          register: pvc_out
+          changed_when: false
+          failed_when: false
+
+        - name: Display status
+          ansible.builtin.debug:
+            msg:
+              - "=== Pods ===\n{{ pods_out.stdout }}"
+              - "=== Services ===\n{{ svc_out.stdout }}"
+              - "=== Routes ===\n{{ route_out.stdout }}"
+              - "=== PVCs ===\n{{ pvc_out.stdout }}"
+
+    # ---- CLEANUP -------------------------------------------------------------
+    - name: Clean up OpenEMR deployment
+      when: action == "cleanup"
+      block:
+        - name: Confirm cleanup
+          ansible.builtin.pause:
+            prompt: |
+              WARNING: This will DELETE all OpenEMR resources including PVCs (ALL DATA LOST).
+              Press ENTER to continue or Ctrl+C to abort.
+
+        - name: Delete deployments
+          kubernetes.core.k8s:
+            state: absent
+            namespace: "{{ openshift_namespace }}"
+            kind: Deployment
+            name: "{{ item }}"
+          loop: [openemr, redis, mariadb]
+          failed_when: false
+
+        - name: Delete services
+          kubernetes.core.k8s:
+            state: absent
+            namespace: "{{ openshift_namespace }}"
+            kind: Service
+            name: "{{ item }}"
+          loop: [openemr, redis, mariadb]
+          failed_when: false
+
+        - name: Delete route
+          kubernetes.core.k8s:
+            state: absent
+            namespace: "{{ openshift_namespace }}"
+            api_version: route.openshift.io/v1
+            kind: Route
+            name: openemr
+          failed_when: false
+
+        - name: Delete secrets
+          kubernetes.core.k8s:
+            state: absent
+            namespace: "{{ openshift_namespace }}"
+            kind: Secret
+            name: "{{ item }}"
+          loop: [mariadb-secret, openemr-secret]
+          failed_when: false
+
+        - name: Delete PVCs
+          kubernetes.core.k8s:
+            state: absent
+            namespace: "{{ openshift_namespace }}"
+            kind: PersistentVolumeClaim
+            name: "{{ item }}"
+          loop: [mariadb-data, openemr-sites]
+          failed_when: false
+
+        - name: Cleanup complete
+          ansible.builtin.debug:
+            msg: "All OpenEMR resources removed from namespace: {{ openshift_namespace }}"
+
+    # ---- DEPLOY --------------------------------------------------------------
+    - name: Deploy OpenEMR
+      when: action == "deploy"
+      block:
+
+        # -- Resolve passwords -------------------------------------------------
+        # Priority: pinned in vars/main.yml > existing cluster secret > generated
+        - name: Generate candidate passwords
+          ansible.builtin.set_fact:
+            _gen_db_password: "{{ lookup('ansible.builtin.password', '/dev/null',
+                                  length=48, chars=['ascii_letters', 'digits']) }}"
+            _gen_db_root_password: "{{ lookup('ansible.builtin.password', '/dev/null',
+                                       length=48, chars=['ascii_letters', 'digits']) }}"
+            _gen_oe_admin_password: "{{ lookup('ansible.builtin.password', '/dev/null',
+                                        length=24, chars=['ascii_letters', 'digits']) }}"
+
+        - name: Check for existing mariadb-secret
+          kubernetes.core.k8s_info:
+            kind: Secret
+            name: mariadb-secret
+            namespace: "{{ openshift_namespace }}"
+          register: existing_mariadb_secret
+
+        - name: Check for existing openemr-secret
+          kubernetes.core.k8s_info:
+            kind: Secret
+            name: openemr-secret
+            namespace: "{{ openshift_namespace }}"
+          register: existing_oe_secret
+
+        - name: Resolve final passwords
+          ansible.builtin.set_fact:
+            _db_password: >-
+              {{ db_password | default(
+                   existing_mariadb_secret.resources[0].data['database-password'] | b64decode
+                   if existing_mariadb_secret.resources | length > 0
+                   else _gen_db_password
+                 ) }}
+            _db_root_password: >-
+              {{ db_root_password | default(
+                   existing_mariadb_secret.resources[0].data['database-root-password'] | b64decode
+                   if existing_mariadb_secret.resources | length > 0
+                   else _gen_db_root_password
+                 ) }}
+            _oe_admin_password: >-
+              {{ oe_admin_password | default(
+                   existing_oe_secret.resources[0].data['admin-password'] | b64decode
+                   if existing_oe_secret.resources | length > 0
+                   else _gen_oe_admin_password
+                 ) }}
+
+        # -- Build manifests ---------------------------------------------------
+        - name: Set MariaDB Secret manifest
+          ansible.builtin.set_fact:
+            manifest_mariadb_secret:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: mariadb-secret
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: mariadb
+                  app.kubernetes.io/name: mariadb
+                  app.kubernetes.io/component: database
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: mariadb
+              type: Opaque
+              stringData:
+                database-name: "{{ db_name }}"
+                database-user: "{{ db_user }}"
+                database-password: "{{ _db_password }}"
+                database-root-password: "{{ _db_root_password }}"
+
+        - name: Set MariaDB PVC manifest
+          ansible.builtin.set_fact:
+            manifest_mariadb_pvc:
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata:
+                name: mariadb-data
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: mariadb
+                  app.kubernetes.io/name: mariadb
+                  app.kubernetes.io/component: database
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: mariadb
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: "{{ db_storage_size }}"
+                storageClassName: "{{ storage_class }}"
+
+        - name: Set MariaDB Deployment manifest
+          ansible.builtin.set_fact:
+            manifest_mariadb_deployment:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: mariadb
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: mariadb
+                  app.kubernetes.io/name: mariadb
+                  app.kubernetes.io/component: database
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: mariadb
+                  app.kubernetes.io/version: "11.8"
+                  app.kubernetes.io/managed-by: ansible
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: mariadb
+                template:
+                  metadata:
+                    labels:
+                      app: mariadb
+                      app.kubernetes.io/name: mariadb
+                      app.kubernetes.io/component: database
+                      app.kubernetes.io/part-of: openemr
+                      app.kubernetes.io/runtime: mariadb
+                      app.kubernetes.io/version: "11.8"
+                  spec:
+                    containers:
+                      - name: mariadb
+                        image: "{{ mariadb_image }}"
+                        ports:
+                          - containerPort: 3306
+                            name: mysql
+                        env:
+                          - name: MYSQL_ROOT_PASSWORD
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-root-password
+                          - name: MYSQL_DATABASE
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-name
+                          - name: MYSQL_USER
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-user
+                          - name: MYSQL_PASSWORD
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-password
+                        volumeMounts:
+                          - name: mariadb-data
+                            mountPath: /var/lib/mysql
+                        livenessProbe:
+                          tcpSocket:
+                            port: 3306
+                          initialDelaySeconds: 30
+                          periodSeconds: 10
+                        readinessProbe:
+                          exec:
+                            command:
+                              - /bin/sh
+                              - -c
+                              - mysqladmin ping -h localhost
+                          initialDelaySeconds: 5
+                          periodSeconds: 10
+                        resources: "{{ mariadb_resources }}"
+                    volumes:
+                      - name: mariadb-data
+                        persistentVolumeClaim:
+                          claimName: mariadb-data
+
+        - name: Set MariaDB Service manifest
+          ansible.builtin.set_fact:
+            manifest_mariadb_service:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: mariadb
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: mariadb
+                  app.kubernetes.io/name: mariadb
+                  app.kubernetes.io/component: database
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: mariadb
+              spec:
+                ports:
+                  - port: 3306
+                    targetPort: 3306
+                    name: mysql
+                selector:
+                  app: mariadb
+                type: ClusterIP
+
+        - name: Set Redis Deployment manifest
+          ansible.builtin.set_fact:
+            manifest_redis_deployment:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: redis
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: redis
+                  app.kubernetes.io/name: redis
+                  app.kubernetes.io/component: cache
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/managed-by: ansible
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: redis
+                template:
+                  metadata:
+                    labels:
+                      app: redis
+                      app.kubernetes.io/name: redis
+                      app.kubernetes.io/component: cache
+                      app.kubernetes.io/part-of: openemr
+                  spec:
+                    containers:
+                      - name: redis
+                        image: "{{ redis_image }}"
+                        command:
+                          - redis-server
+                          - --save
+                          - ""
+                          - --appendonly
+                          - "no"
+                          - --maxmemory
+                          - "{{ redis_max_memory }}"
+                          - --maxmemory-policy
+                          - "{{ redis_max_memory_policy }}"
+                        ports:
+                          - containerPort: 6379
+                            name: redis
+                        resources: "{{ redis_resources }}"
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          runAsNonRoot: true
+                          capabilities:
+                            drop:
+                              - ALL
+                          seccompProfile:
+                            type: RuntimeDefault
+
+        - name: Set Redis Service manifest
+          ansible.builtin.set_fact:
+            manifest_redis_service:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: redis
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: redis
+                  app.kubernetes.io/name: redis
+                  app.kubernetes.io/component: cache
+                  app.kubernetes.io/part-of: openemr
+              spec:
+                ports:
+                  - port: 6379
+                    targetPort: 6379
+                    name: redis
+                selector:
+                  app: redis
+                type: ClusterIP
+
+        - name: Set OpenEMR PVC manifest
+          ansible.builtin.set_fact:
+            manifest_openemr_pvc:
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata:
+                name: openemr-sites
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: openemr
+                  app.kubernetes.io/name: openemr
+                  app.kubernetes.io/component: application
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: php
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: "{{ documents_storage_size }}"
+                storageClassName: "{{ storage_class }}"
+
+        - name: Set OpenEMR Secret manifest
+          ansible.builtin.set_fact:
+            manifest_openemr_secret:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: openemr-secret
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: openemr
+                  app.kubernetes.io/name: openemr
+                  app.kubernetes.io/component: application
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: php
+              type: Opaque
+              stringData:
+                admin-username: "{{ oe_admin_user }}"
+                admin-password: "{{ _oe_admin_password }}"
+
+        - name: Set OpenEMR Deployment manifest
+          ansible.builtin.set_fact:
+            manifest_openemr_deployment:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: openemr
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: openemr
+                  app.kubernetes.io/name: openemr
+                  app.kubernetes.io/component: application
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: php
+                  app.kubernetes.io/version: "8.0.0"
+                  app.kubernetes.io/managed-by: ansible
+                annotations:
+                  app.openshift.io/runtime: php
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: openemr
+                template:
+                  metadata:
+                    labels:
+                      app: openemr
+                      app.kubernetes.io/name: openemr
+                      app.kubernetes.io/component: application
+                      app.kubernetes.io/part-of: openemr
+                      app.kubernetes.io/runtime: php
+                      app.kubernetes.io/version: "8.0.0"
+                  spec:
+                    containers:
+                      - name: openemr
+                        image: "{{ openemr_image }}"
+                        ports:
+                          - containerPort: 8080
+                            name: http
+                        env:
+                          - name: MYSQL_HOST
+                            value: mariadb
+                          - name: MYSQL_DATABASE
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-name
+                          - name: MYSQL_USER
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-user
+                          - name: MYSQL_PASS
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-password
+                          - name: OE_USER
+                            value: "{{ oe_admin_user }}"
+                          - name: OE_PASS
+                            valueFrom:
+                              secretKeyRef:
+                                name: openemr-secret
+                                key: admin-password
+                          - name: DB_HOST
+                            value: mariadb
+                          - name: DB_PORT
+                            value: "3306"
+                          - name: DB_DATABASE
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-name
+                          - name: DB_USER
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-user
+                          - name: DB_PASSWORD
+                            valueFrom:
+                              secretKeyRef:
+                                name: mariadb-secret
+                                key: database-password
+                        volumeMounts:
+                          - name: openemr-sites
+                            mountPath: /var/www/html/openemr/sites/default
+                        startupProbe:
+                          httpGet:
+                            path: /health
+                            port: 8080
+                          initialDelaySeconds: 10
+                          periodSeconds: 10
+                          timeoutSeconds: 5
+                          failureThreshold: 30
+                        livenessProbe:
+                          httpGet:
+                            path: /health
+                            port: 8080
+                          periodSeconds: 10
+                          timeoutSeconds: 5
+                          failureThreshold: 3
+                        readinessProbe:
+                          httpGet:
+                            path: /health
+                            port: 8080
+                          initialDelaySeconds: 10
+                          periodSeconds: 10
+                          timeoutSeconds: 5
+                        resources: "{{ openemr_resources }}"
+                    volumes:
+                      - name: openemr-sites
+                        persistentVolumeClaim:
+                          claimName: openemr-sites
+
+        - name: Set OpenEMR Service manifest
+          ansible.builtin.set_fact:
+            manifest_openemr_service:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: openemr
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: openemr
+                  app.kubernetes.io/name: openemr
+                  app.kubernetes.io/component: application
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: php
+              spec:
+                ports:
+                  - port: 8080
+                    targetPort: 8080
+                    name: http
+                selector:
+                  app: openemr
+                type: ClusterIP
+
+        - name: Set OpenEMR Route manifest
+          ansible.builtin.set_fact:
+            manifest_openemr_route:
+              apiVersion: route.openshift.io/v1
+              kind: Route
+              metadata:
+                name: openemr
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: openemr
+                  app.kubernetes.io/name: openemr
+                  app.kubernetes.io/component: application
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/runtime: php
+              spec:
+                to:
+                  kind: Service
+                  name: openemr
+                port:
+                  targetPort: http
+                tls:
+                  termination: edge
+                  insecureEdgeTerminationPolicy: Redirect
+
+        # -- Apply to cluster --------------------------------------------------
+        - name: Apply MariaDB Secret
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_mariadb_secret }}"
+
+        - name: Apply MariaDB PVC
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_mariadb_pvc }}"
+
+        - name: Apply MariaDB Deployment
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_mariadb_deployment }}"
+
+        - name: Apply MariaDB Service
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_mariadb_service }}"
+
+        - name: Wait for MariaDB to be ready
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ openshift_namespace }}"
+            label_selectors:
+              - app=mariadb
+            wait: true
+            wait_condition:
+              type: Ready
+              status: "True"
+            wait_timeout: "{{ mariadb_wait_timeout }}"
+
+        - name: Apply Redis Deployment
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_redis_deployment }}"
+
+        - name: Apply Redis Service
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_redis_service }}"
+
+        - name: Wait for Redis to be ready
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ openshift_namespace }}"
+            label_selectors:
+              - app=redis
+            wait: true
+            wait_condition:
+              type: Ready
+              status: "True"
+            wait_timeout: "{{ redis_wait_timeout }}"
+
+        - name: Apply OpenEMR PVC
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_openemr_pvc }}"
+
+        - name: Apply OpenEMR Secret
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_openemr_secret }}"
+
+        - name: Apply OpenEMR Deployment
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_openemr_deployment }}"
+
+        - name: Apply OpenEMR Service
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_openemr_service }}"
+
+        - name: Apply OpenEMR Route
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_openemr_route }}"
+
+        - name: Wait for OpenEMR to be ready
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ openshift_namespace }}"
+            label_selectors:
+              - app=openemr
+            wait: true
+            wait_condition:
+              type: Ready
+              status: "True"
+            wait_timeout: "{{ openemr_wait_timeout }}"
+
+        - name: Create crypto keys directory
+          ansible.builtin.command: >
+            oc exec -n {{ openshift_namespace }} deployment/openemr --
+            mkdir -p /var/www/html/openemr/sites/default/documents/logs_and_misc/methods
+          changed_when: true
+          failed_when: false
+
+        - name: Set permissions on crypto directory
+          ansible.builtin.command: >
+            oc exec -n {{ openshift_namespace }} deployment/openemr --
+            chmod -R 770 /var/www/html/openemr/sites/default/documents/logs_and_misc
+          changed_when: true
+          failed_when: false
+
+        # -- Export manifests --------------------------------------------------
+        - name: Create manifests output directory
+          ansible.builtin.file:
+            path: "{{ manifests_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Write YAML manifests to local folder
+          ansible.builtin.copy:
+            dest: "{{ manifests_dir }}/{{ item.filename }}"
+            content: "{{ item.manifest | to_nice_yaml(indent=2) }}"
+            mode: "0640"
+          loop:
+            - filename: "01-mariadb-secret.yaml"
+              manifest: "{{ manifest_mariadb_secret }}"
+            - filename: "02-mariadb-pvc.yaml"
+              manifest: "{{ manifest_mariadb_pvc }}"
+            - filename: "03-mariadb-deployment.yaml"
+              manifest: "{{ manifest_mariadb_deployment }}"
+            - filename: "04-mariadb-service.yaml"
+              manifest: "{{ manifest_mariadb_service }}"
+            - filename: "05-redis-deployment.yaml"
+              manifest: "{{ manifest_redis_deployment }}"
+            - filename: "06-redis-service.yaml"
+              manifest: "{{ manifest_redis_service }}"
+            - filename: "07-openemr-pvc.yaml"
+              manifest: "{{ manifest_openemr_pvc }}"
+            - filename: "08-openemr-secret.yaml"
+              manifest: "{{ manifest_openemr_secret }}"
+            - filename: "09-openemr-deployment.yaml"
+              manifest: "{{ manifest_openemr_deployment }}"
+            - filename: "10-openemr-service.yaml"
+              manifest: "{{ manifest_openemr_service }}"
+            - filename: "11-openemr-route.yaml"
+              manifest: "{{ manifest_openemr_route }}"
+          no_log: "{{ item.filename is search('secret') }}"
+
+        - name: Write kustomization.yaml
+          ansible.builtin.copy:
+            dest: "{{ manifests_dir }}/kustomization.yaml"
+            mode: "0644"
+            content: |
+              apiVersion: kustomize.config.k8s.io/v1beta1
+              kind: Kustomization
+
+              namespace: {{ openshift_namespace }}
+
+              resources:
+                - 01-mariadb-secret.yaml
+                - 02-mariadb-pvc.yaml
+                - 03-mariadb-deployment.yaml
+                - 04-mariadb-service.yaml
+                - 05-redis-deployment.yaml
+                - 06-redis-service.yaml
+                - 07-openemr-pvc.yaml
+                - 08-openemr-secret.yaml
+                - 09-openemr-deployment.yaml
+                - 10-openemr-service.yaml
+                - 11-openemr-route.yaml
+
+        # -- Summary -----------------------------------------------------------
+        - name: Get OpenEMR Route
+          kubernetes.core.k8s_info:
+            kind: Route
+            api_version: route.openshift.io/v1
+            name: openemr
+            namespace: "{{ openshift_namespace }}"
+          register: openemr_route
+
+        - name: Set Route URL fact
+          ansible.builtin.set_fact:
+            route_url: "{{ openemr_route.resources[0].spec.host | default('pending') }}"
+
+        - name: Save credentials file
+          ansible.builtin.copy:
+            dest: "{{ credentials_file }}"
+            mode: "0600"
+            content: |
+              OpenEMR Deployment Credentials
+              ==============================
+              Project: {{ openshift_namespace }}
+
+              Access URL: https://{{ route_url }}
+
+              OpenEMR Admin Credentials:
+                Username: {{ oe_admin_user }}
+                Password: {{ _oe_admin_password }}
+
+              Database Information:
+                Host: mariadb.{{ openshift_namespace }}.svc.cluster.local
+                Port: 3306
+                Database: {{ db_name }}
+                Username: {{ db_user }}
+                Password: {{ _db_password }}
+                Root Password: {{ _db_root_password }}
+
+              Manifests exported to: {{ manifests_dir }}/
+
+              Notes:
+                - OpenEMR will auto-configure on first run
+                - Wait 2-3 minutes after deployment for setup to complete
+                - WARNING: Keep this file secure!
+
+        - name: Display deployment summary
+          ansible.builtin.debug:
+            msg:
+              - "============================================"
+              - "  OpenEMR Deployment Complete!"
+              - "============================================"
+              - "  URL:           https://{{ route_url }}"
+              - "  Admin User:    {{ oe_admin_user }}"
+              - "  Admin Pass:    {{ _oe_admin_password }}"
+              - "  DB Host:       mariadb.{{ openshift_namespace }}.svc.cluster.local"
+              - "  DB Name:       {{ db_name }}"
+              - "  Manifests:     {{ manifests_dir }}/"
+              - "  Credentials:   {{ credentials_file }}"
+              - "============================================"
+              - "  NOTE: Wait 2-3 min for auto-configuration"
+              - "============================================"

@@ -12,10 +12,6 @@
 
 Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift Developer Sandbox using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository.
 
-<p align="center">
-  <img src="https://www.open-emr.org/images/openemr-blue-logo.png" alt="OpenEMR Logo" width="300">
-</p>
-
 ## Overview
 
 This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift Developer Sandbox.
@@ -35,7 +31,6 @@ This project provides a complete containerized deployment of OpenEMR (Open-sourc
 ### ✨ Key Features
 
 - **Custom OpenEMR Container**: Built on CentOS 10 Stream with Remi's PHP 8.5
-- **CI/CD Pipeline**: GitHub Actions builds and pushes to Quay.io on every change, with weekly rebuilds for security patches
 - **Redis Session Storage**: Redis 8 Alpine for improved performance and scalability
 - **MariaDB 11.8**: Latest Fedora MariaDB for robust database backend
 - **Developer Sandbox Ready**: Optimized for Developer Sandbox storage and resource constraints
@@ -70,7 +65,7 @@ Whether you're a solo practitioner, a community health center, or a large health
 ```
 ┌─────────────────────────────────────────────┐
 │          OpenShift Route (HTTPS)            │
-│    openemr.apps.project-namespace.apps.rm3.7wse.p1.openshiftapps.com    │
+│    openemr-openemr.apps.sandbox.xxx.xxx     │
 └─────────────────┬───────────────────────────┘
                   │
 ┌─────────────────▼───────────────────────────┐
@@ -91,7 +86,7 @@ Whether you're a solo practitioner, a community health center, or a large health
          │              │
     ┌────▼────────┐ ┌──▼───────────┐
     │ Redis Pod   │ │ MariaDB      │
-    │ (sessions)  │ │ Deployment   │
+    │ (sessions)  │ │ StatefulSet  │
     └────┬────────┘ └──┬───────────┘
          │             │
     ┌────▼────────┐ ┌─▼────────────┐
@@ -157,61 +152,42 @@ Whether you're a solo practitioner, a community health center, or a large health
 - Basic understanding of Kubernetes/OpenShift concepts
 
 **Developer Sandbox Limitations to be aware of:**
-- Access to Sandbox must renewed every 30 days
+- Projects expire after 30 days of inactivity
 - Storage limited to ~40GB total per namespace
 - Resource quotas: Limited CPU/memory per namespace
 - No cluster-admin access
 - Single replica deployments recommended for persistent storage
-- Sandbox is not for production deployments.
 
 ## Quick Start
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/ryannix123/openemr-on-openshift.git
+git clone https://github.com/ryannix123/openemr-openshift.git
 cd openemr-openshift
 ```
 
 ### 2. Build the Container (Optional)
 
-The container is automatically built and pushed to Quay.io via GitHub Actions CI/CD. You can use the pre-built image directly:
-
-```
-quay.io/ryan_nix/openemr-openshift:latest
-```
-
-The CI/CD pipeline:
-- Builds on every push to `main` when container-related files change
-- Rebuilds weekly (Mondays at 6am UTC) to pick up base image security patches
-- Can be triggered manually via GitHub Actions with optional version override
-- Caches layers with GitHub Actions cache for fast rebuilds
-
-If you want to build locally instead:
+If you want to build your own container:
 
 ```bash
-# Build the container
-podman build --platform linux/amd64 \
-  -t quay.io/ryan_nix/openemr-openshift:8.0.0 \
-  -t quay.io/ryan_nix/openemr-openshift:latest \
-  -f Containerfile .
+# Build the container (creates both :latest and :8.0.0 tags)
+podman build -t quay.io/ryan_nix/openemr-openshift:latest .
 
 # Push to Quay.io
 podman login quay.io
-podman push quay.io/ryan_nix/openemr-openshift:8.0.0
 podman push quay.io/ryan_nix/openemr-openshift:latest
 ```
 
-> **Note**: Building with `--platform linux/amd64` on Apple Silicon (M1/M2/M3/M4) may fail with CentOS Stream 10 due to QEMU userspace emulation issues. Use the GitHub Actions pipeline or build on a native x86_64 host.
+Or use the pre-built image: `quay.io/ryan_nix/openemr-openshift:latest`
 
 ### 3. Configure the Deployment (Optional)
 
-The script is pre-configured for Developer Sandbox with sensible defaults:
+Both deployment methods are pre-configured for Developer Sandbox with sensible defaults:
 - Storage: `gp3` (default Developer Sandbox storage class)
 - Database: 5Gi
 - Documents: 10Gi
-
-You can optionally adjust these in `deploy-openemr.sh` if needed, but defaults work well for most cases.
 
 ### 4. Login to OpenShift Developer Sandbox
 
@@ -222,39 +198,79 @@ oc login --token=sha256~xxxxx --server=https://api.sandbox.xxxxx.openshiftapps.c
 
 ### 5. Deploy OpenEMR
 
+Two deployment methods are available — choose whichever fits your environment.
+
+---
+
+#### Option A — Shell Script
+
+The quickest path. Requires bash (Linux, macOS, or WSL on Windows).
+
 ```bash
 chmod +x deploy-openemr.sh
 ./deploy-openemr.sh
 ```
 
-The script will:
-1. Create the OpenShift project
-2. Deploy MariaDB with persistent storage
-3. Deploy OpenEMR application
-4. Create routes for external access
-5. Display access credentials
+| Command | Description |
+|---------|-------------|
+| `./deploy-openemr.sh` | Deploy OpenEMR |
+| `./deploy-openemr.sh --status` | Check deployment status |
+| `./deploy-openemr.sh --cleanup` | Remove all resources (deletes data) |
+
+---
+
+#### Option B — Ansible Playbook
+
+Platform-agnostic alternative that runs on macOS, Linux, or any system with Python — **no WSL required**. Also compatible with Ansible Automation Platform (AAP) / Tower.
+
+**Install prerequisites:**
+
+```bash
+pip install ansible kubernetes
+ansible-galaxy collection install kubernetes.core
+```
+
+**Run the playbook:**
+
+```bash
+cd ansible/
+ansible-playbook deploy-openemr.yml
+```
+
+| Command | Description |
+|---------|-------------|
+| `ansible-playbook deploy-openemr.yml` | Deploy OpenEMR |
+| `ansible-playbook deploy-openemr.yml -e "action=status"` | Check deployment status |
+| `ansible-playbook deploy-openemr.yml -e "action=cleanup"` | Remove all resources (deletes data) |
+
+**Common overrides:**
+
+```bash
+# Use a different storage class (e.g. ODF/Ceph on a full cluster)
+ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
+
+# Pin the admin password instead of auto-generating one
+ansible-playbook deploy-openemr.yml -e "oe_admin_password=MySecurePass123"
+
+# Use a custom vars file for environment-specific settings
+ansible-playbook deploy-openemr.yml -e "@vars/prod.yml"
+```
+
+All tunables — images, storage class, resource limits, timeouts, and output paths — are managed in `ansible/vars/main.yml`. See the [Ansible README](ansible/README.md) for full details.
+
+> **Re-runs are safe.** The playbook detects existing Secrets and preserves passwords rather than regenerating them on subsequent runs.
+
+---
 
 ### 6. Complete OpenEMR Setup
 
-1. Navigate to the URL provided in the deployment summary
-2. Follow the OpenEMR setup wizard
-3. Use the database credentials from `openemr-credentials.txt`
+Both methods produce the same result. After deployment:
+
+1. Navigate to the URL shown in the deployment summary
+2. Wait 2–3 minutes for OpenEMR's auto-configuration to complete
+3. Log in with the admin credentials saved to `openemr-credentials.txt`
 
 ## Configuration
-
-### Waking Up Your Deployment
-
-The Developer Sandbox automatically scales deployments to zero after 12 hours of inactivity. When you return and find your pods stopped, run:
-
-```bash
-# Scale all deployments back to 1 replica
-oc scale deployment --all --replicas=1
-
-# Watch pods come back up
-oc get pods -w
-```
-
-Your data persists in the PVCs — only the pods are stopped during hibernation. OpenEMR will be ready once all three pods (OpenEMR, MariaDB, Redis) show `Running`.
 
 ### Storage Classes
 
@@ -274,7 +290,7 @@ The deployment uses **AWS EBS gp3** storage (default in Developer Sandbox):
 1. Deploy on a full OpenShift cluster with RWX storage (e.g., ODF CephFS)
 2. Update storage class to RWX-capable storage
 3. Change `ReadWriteOnce` to `ReadWriteMany` in documents PVC
-4. Then scale: `oc scale deployment/openemr --replicas=3`
+4. Then scale: `oc scale deployment/openemr --replicas=3 -n openemr`
 
 ### Resource Limits
 
@@ -331,10 +347,6 @@ All required OpenEMR extensions are included:
 - php-imap (email)
 - php-sodium (encryption)
 - php-pecl-redis5 (session storage)
-- php-bcmath (arbitrary precision math)
-- php-intl (internationalization)
-- php-tidy (HTML cleanup)
-- php-xmlrpc (XML-RPC)
 
 ### Health Checks
 
@@ -349,13 +361,13 @@ The container exposes these endpoints:
 
 ```bash
 # OpenEMR application logs
-oc logs -f $(oc get pod -l app=openemr -o name)
+oc logs -f deployment/openemr -n openemr
 
 # MariaDB logs
-oc logs -f $(oc get pod -l app=mariadb -o name)
+oc logs -f statefulset/mariadb -n openemr
 
 # Get all pods
-oc get pods
+oc get pods -n openemr
 ```
 
 ### Common Issues
@@ -363,28 +375,28 @@ oc get pods
 **Pod not starting:**
 ```bash
 # Describe the pod for events
-oc describe pod <pod-name>
+oc describe pod <pod-name> -n openemr
 
 # Check for image pull errors
-oc get events --sort-by='.lastTimestamp'
+oc get events -n openemr --sort-by='.lastTimestamp'
 ```
 
 **Storage issues:**
 ```bash
 # Check PVC status
-oc get pvc
+oc get pvc -n openemr
 
 # Describe PVC for binding issues
-oc describe pvc <pvc-name>
+oc describe pvc <pvc-name> -n openemr
 ```
 
 **Database connection errors:**
 ```bash
 # Verify MariaDB is running
-oc get pods -l app=mariadb
+oc get pods -l app=mariadb -n openemr
 
 # Test database connectivity from OpenEMR pod
-oc exec -it $(oc get pod -l app=openemr -o name) -- bash
+oc exec -it deployment/openemr -n openemr -- bash
 # Inside the pod:
 php -r "mysqli_connect('mariadb', 'openemr', 'password', 'openemr') or die(mysqli_connect_error());"
 ```
@@ -394,10 +406,13 @@ php -r "mysqli_connect('mariadb', 'openemr', 'password', 'openemr') or die(mysql
 To completely remove and redeploy:
 
 ```bash
-# Run the cleanup script
+# Shell script
 ./deploy-openemr.sh --cleanup
-# Wait for all pods to terminate, then re-run:
 ./deploy-openemr.sh
+
+# Ansible
+ansible-playbook ansible/deploy-openemr.yml -e "action=cleanup"
+ansible-playbook ansible/deploy-openemr.yml
 ```
 
 ## Security Considerations
@@ -464,41 +479,6 @@ For production healthcare deployments:
      pod-security.kubernetes.io/warn=restricted
    ```
 
-## Securing Access with IP Whitelisting
-
-OpenShift makes it easy to restrict access to your OpenEMR instance by IP address using route annotations — no firewall rules or external load balancer configuration needed. Not a true firewall, but it restricts access."
-
-### Allow Only Specific IPs
-
-```bash
-# Allow access only allowed IPs.
-oc annotate route openemr \
-  haproxy.router.openshift.io/ip_whitelist="203.0.113.50 198.51.100.0/24"
-```
-
-### Common Use Cases
-
-| Scenario | Annotation Value |
-|----------|-----------------|
-| Single IP | `203.0.113.50` |
-| Multiple IPs | `203.0.113.50 198.51.100.25` |
-| CIDR range | `10.0.0.0/8` |
-| Mixed | `203.0.113.50 192.168.1.0/24 10.0.0.0/8` |
-
-### Remove Restriction
-
-```bash
-oc annotate route openemr haproxy.router.openshift.io/ip_whitelist-
-```
-
-### Verify Configuration
-
-```bash
-oc get route openemr -o jsonpath='{.metadata.annotations.haproxy\.router\.openshift\.io/ip_whitelist}'
-```
-
-This is especially useful for locking down a demo or development instance to only your team's IPs without any infrastructure changes. For healthcare environments handling PHI, IP whitelisting adds an important layer of access control alongside TLS and authentication.
-
 ## Maintenance
 
 ### Backup
@@ -506,7 +486,7 @@ This is especially useful for locking down a demo or development instance to onl
 **Database backup:**
 ```bash
 # Create database dump
-oc exec -it $(oc get pod -l app=mariadb -o name) -- \
+oc exec -it statefulset/mariadb -n openemr -- \
   mysqldump -u root -p"$DB_ROOT_PASSWORD" openemr > openemr-backup-$(date +%Y%m%d).sql
 ```
 
@@ -518,40 +498,44 @@ oc rsync openemr-pod:/var/www/html/openemr/sites/default/documents ./backup/docu
 
 ### Updates
 
-Container updates are handled automatically by the CI/CD pipeline. To update to a new OpenEMR version:
-
-1. Update `OPENEMR_VERSION` in the `Containerfile`
-2. Push to `main` — GitHub Actions will build and push the new image
-3. Roll out the update to your cluster:
-
+**Update OpenEMR container:**
 ```bash
-# Update deployment to use the new image tag
-oc set image deployment/openemr \
-  openemr=quay.io/ryan_nix/openemr-openshift:8.0.1
-```
+# Build new version
+podman build -t quay.io/ryan_nix/openemr-openshift:7.0.6 .
+podman push quay.io/ryan_nix/openemr-openshift:7.0.6
 
-To manually trigger a rebuild (e.g., to pick up security patches immediately):
-1. Go to **Actions** → **Build and Push OpenEMR** → **Run workflow**
-2. Optionally check **Force rebuild** to rebuild even if the tag already exists
+# Update deployment
+oc set image deployment/openemr \
+  openemr=quay.io/ryan_nix/openemr-openshift:7.0.6 -n openemr
+```
 
 ## Project Structure
 
 ```
-openemr-openshift/
-├── Containerfile                          # Multi-stage container build
-├── deploy-openemr.sh                     # Automated deployment script
-├── build-container.sh                    # Local container build helper
-├── README.md                             # This file
-├── .containerignore                      # Files to ignore during build
-├── .github/
-│   └── workflows/
-│       └── build-image.yml               # CI/CD: build & push to Quay.io
+openemr-on-openshift/
+├── Containerfile              # Container build instructions
+├── deploy-openemr.sh          # Shell script deployment (bash/WSL)
+├── README.md                  # This file
+├── .containerignore           # Files to ignore during build
+├── ansible/                   # Ansible deployment (platform-agnostic)
+│   ├── deploy-openemr.yml     # Main playbook
+│   ├── vars/
+│   │   └── main.yml           # All tunables (images, storage, resources)
+│   └── README.md              # Ansible-specific documentation
+└── manifests/                 # (Optional) Individual YAML files
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── route.yaml
+    └── mariadb/
+        ├── statefulset.yaml
+        └── service.yaml
 ```
 
 ## Contributing
 
 Contributions are welcome! Areas for improvement:
 
+- [x] Ansible playbook deployment
 - [ ] Helm chart version
 - [ ] GitOps/ArgoCD manifests
 - [ ] Automated database migrations
@@ -566,9 +550,13 @@ Contributions are welcome! Areas for improvement:
 - [Red Hat OpenShift Documentation](https://docs.openshift.com/)
 - [OpenShift Data Foundation](https://www.redhat.com/en/technologies/cloud-computing/openshift-data-foundation)
 
+## License
+
+This project follows OpenEMR's licensing. OpenEMR is licensed under GPL v3.
+
 ## Author
 
-**Ryan Nix** — projects are personal, not official Red Hat
+**Ryan Nix**
 - Senior Solutions Architect, Red Hat
 - GitHub: [@ryannix123](https://github.com/ryannix123)
 - Quay.io: [ryan_nix](https://quay.io/user/ryan_nix)

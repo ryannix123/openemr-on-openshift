@@ -1,0 +1,99 @@
+---
+# =============================================================================
+# OpenEMR on OpenShift - Deployment Variables
+#
+# Override any value at runtime:
+#   ansible-playbook deploy-openemr.yml -e "@vars/custom.yml"
+#   ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Action
+# -----------------------------------------------------------------------------
+# Controls what the playbook does.
+# Options: deploy | cleanup | status
+action: deploy
+
+# -----------------------------------------------------------------------------
+# Container Images
+# -----------------------------------------------------------------------------
+openemr_image: "quay.io/ryan_nix/openemr-openshift:latest"
+mariadb_image: "quay.io/fedora/mariadb-118:latest"
+redis_image: "docker.io/redis:8-alpine"
+
+# -----------------------------------------------------------------------------
+# Storage
+# -----------------------------------------------------------------------------
+# StorageClass name — adjust for your cluster:
+#   Developer Sandbox / AWS EBS : gp3-csi
+#   ODF / Ceph RBD              : ocs-storagecluster-ceph-rbd
+#   Azure Disk                  : managed-csi
+#   GCE Persistent Disk         : standard-csi
+storage_class: "gp3-csi"
+
+db_storage_size: "5Gi"
+documents_storage_size: "10Gi"
+
+# -----------------------------------------------------------------------------
+# Database
+# -----------------------------------------------------------------------------
+db_name: "openemr"
+db_user: "openemr"
+# db_password / db_root_password are auto-generated at deploy time.
+# Set them here (or via -e) to pin specific values.
+# db_password: ""
+# db_root_password: ""
+
+# -----------------------------------------------------------------------------
+# OpenEMR Admin
+# -----------------------------------------------------------------------------
+oe_admin_user: "admin"
+# oe_admin_password is auto-generated at deploy time.
+# Set it here (or via -e) to pin a specific value.
+# oe_admin_password: ""
+
+# -----------------------------------------------------------------------------
+# Resource Limits
+# -----------------------------------------------------------------------------
+mariadb_resources:
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
+  requests:
+    memory: "512Mi"
+    cpu: "200m"
+
+redis_resources:
+  limits:
+    memory: "256Mi"
+    cpu: "250m"
+  requests:
+    memory: "64Mi"
+    cpu: "50m"
+
+openemr_resources:
+  limits:
+    memory: "768Mi"
+    cpu: "500m"
+  requests:
+    memory: "384Mi"
+    cpu: "200m"
+
+# -----------------------------------------------------------------------------
+# Redis Tuning
+# -----------------------------------------------------------------------------
+redis_max_memory: "256mb"
+redis_max_memory_policy: "allkeys-lru"
+
+# -----------------------------------------------------------------------------
+# Wait Timeouts (seconds)
+# -----------------------------------------------------------------------------
+mariadb_wait_timeout: 300
+redis_wait_timeout: 300
+openemr_wait_timeout: 300
+
+# -----------------------------------------------------------------------------
+# Output Paths
+# -----------------------------------------------------------------------------
+manifests_dir: "./openemr-manifests"
+credentials_file: "./openemr-credentials.txt"
