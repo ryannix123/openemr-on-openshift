@@ -536,6 +536,7 @@ openemr-on-openshift/
 Contributions are welcome! Areas for improvement:
 
 - [x] Ansible playbook deployment
+- [ ] Service Mesh - Istio
 - [ ] Helm chart version
 - [ ] GitOps/ArgoCD manifests
 - [ ] Automated database migrations
