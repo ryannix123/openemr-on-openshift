@@ -549,7 +549,7 @@ Contributions are welcome! Areas for improvement:
 - [OpenEMR Official Site](https://www.open-emr.org/)
 - [OpenEMR Documentation](https://www.open-emr.org/wiki/index.php/OpenEMR_Wiki_Home_Page)
 - [Red Hat OpenShift Documentation](https://docs.openshift.com/)
-- [OpenShift Data Foundation](https://www.redhat.com/en/technologies/cloud-computing/openshift-data-foundation)
+- [Red Hat OpenShift Developer Sandbox](https://developers.redhat.com/developer-sandbox)
 
 ## License
 
