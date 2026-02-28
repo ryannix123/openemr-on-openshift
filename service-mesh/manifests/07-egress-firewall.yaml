@@ -1,0 +1,42 @@
+---
+# EgressFirewall is an OpenShift/OVN-Kubernetes feature — unchanged from OSSM 2.x.
+# Controls outbound traffic from pods in the openemr namespace.
+apiVersion: k8s.ovn.org/v1
+kind: EgressFirewall
+metadata:
+  name: openemr-egress
+  namespace: openemr
+spec:
+  egress:
+    # Allow image pulls
+    - type: Allow
+      to:
+        dnsName: "quay.io"
+    - type: Allow
+      to:
+        dnsName: "registry.access.redhat.com"
+    - type: Allow
+      to:
+        dnsName: "docker.io"
+    # Allow OpenEMR project resources
+    - type: Allow
+      to:
+        dnsName: "open-emr.org"
+    - type: Allow
+      to:
+        dnsName: "www.open-emr.org"
+    # Allow NTP
+    - type: Allow
+      to:
+        cidrSelector: "0.0.0.0/0"
+      ports:
+        - protocol: UDP
+          port: 123
+    # Allow Istio control plane communication (if istio-system is on a different node)
+    - type: Allow
+      to:
+        dnsName: "istiod.istio-system.svc.cluster.local"
+    # DENY everything else
+    - type: Deny
+      to:
+        cidrSelector: "0.0.0.0/0"

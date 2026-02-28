@@ -1,0 +1,98 @@
+---
+# NetworkPolicies work at L3/L4 via the CNI plugin (OVN-Kubernetes).
+# These are independent of the service mesh and provide a defense-in-depth
+# layer that works even if the mesh control plane is unavailable.
+# No changes needed from OSSM 2.x — NetworkPolicy is a Kubernetes primitive.
+
+# Default deny all ingress within the namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: openemr
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# Allow OpenShift Router to reach OpenEMR
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-router-to-openemr
+  namespace: openemr
+spec:
+  podSelector:
+    matchLabels:
+      app: openemr
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+
+---
+# Allow OpenEMR to reach MariaDB
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-openemr-to-mariadb
+  namespace: openemr
+spec:
+  podSelector:
+    matchLabels:
+      app: mariadb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: openemr
+      ports:
+        - protocol: TCP
+          port: 3306
+
+---
+# Allow OpenEMR to reach Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-openemr-to-redis
+  namespace: openemr
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: openemr
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# Allow ztunnel and waypoint inter-pod communication
+# ztunnel uses HBONE (HTTP-based overlay network) on port 15008
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ztunnel-hbone
+  namespace: openemr
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 15008   # HBONE tunnel port used by ztunnel
+        - protocol: TCP
+          port: 15009   # HBONE mTLS

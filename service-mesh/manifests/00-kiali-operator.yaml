@@ -1,0 +1,37 @@
+---
+# Kiali Operator — provides the Kiali CR and the service topology UI.
+# Must be installed separately from the Sail Operator in OSSM 3.
+# Deploy this after the Sail Operator is ready.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: kiali-ossm
+  namespace: openshift-operators
+spec:
+  channel: stable
+  name: kiali-ossm
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+
+---
+# Kiali instance — created after the Kiali Operator CSV is ready.
+# The deploy script applies this in a separate step with a readiness wait.
+apiVersion: kiali.io/v1alpha1
+kind: Kiali
+metadata:
+  name: kiali
+  namespace: istio-system
+spec:
+  auth:
+    strategy: openshift
+  deployment:
+    accessible_namespaces:
+      - openemr
+  external_services:
+    istio:
+      config_map_name: istio
+      istio_sidecar_injector_config_map_name: ""   # not used in ambient
+      url_service_version: ""
+    tracing:
+      enabled: false   # set to true and configure if you deploy Tempo

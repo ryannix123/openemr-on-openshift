@@ -1,410 +1,411 @@
-#!/bin/bash
-# ==============================================================================
-# OpenEMR Service Mesh Deployment
-# Zero-trust networking for OpenEMR on OpenShift
+#!/usr/bin/env bash
+# deploy-mesh.sh — OpenEMR Service Mesh (OpenShift Service Mesh 3, Ambient Mode)
+# Author: Ryan Nix <ryan.nix@gmail.com>
 #
-# Ryan Nix <ryan.nix@gmail.com> - projects are personal, not official Red Hat
-# ==============================================================================
-
+# This script is fully self-contained. Running --full will:
+#   1. Install the Sail Operator (OSSM 3) via OLM
+#   2. Install the Kiali Operator via OLM
+#   3. Install Gateway API CRDs (required for waypoint proxy)
+#   4. Deploy the Istio control plane and IstioCNI (ztunnel)
+#   5. Enroll the openemr namespace in ambient mode
+#   6. Deploy the waypoint proxy for L7 policy enforcement
+#   7. Apply zero-trust AuthorizationPolicies
+#   8. Apply NetworkPolicies (L3/L4, no mesh dependency)
+#   9. Apply EgressFirewall (OVN-Kubernetes)
+#  10. Deploy a Kiali instance for observability
+#
+# Prerequisites: oc CLI, cluster-admin access, internet or mirrored catalog
 set -euo pipefail
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# ── Configuration ────────────────────────────────────────────────────────────
+NAMESPACE="${OPENEMR_NAMESPACE:-openemr}"
+ISTIO_NS="istio-system"
+CNI_NS="istio-cni"
+MANIFESTS_DIR="$(cd "$(dirname "$0")/manifests" && pwd)"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFESTS_DIR="${SCRIPT_DIR}/manifests"
-OPENEMR_NAMESPACE="${OPENEMR_NAMESPACE:-openemr}"
+# Gateway API version to install (standard channel)
+GATEWAY_API_VERSION="v1.1.0"
+GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
-print_info()    { echo -e "${CYAN}ℹ  $1${NC}"; }
-print_success() { echo -e "${GREEN}✓  $1${NC}"; }
-print_warning() { echo -e "${YELLOW}⚠  $1${NC}"; }
-print_error()   { echo -e "${RED}✗  $1${NC}"; }
+# OLM readiness timeout in seconds
+OLM_TIMEOUT=300
 
-print_banner() {
-    echo -e "${CYAN}"
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║         OpenEMR Service Mesh — Zero Trust Networking        ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-}
+# ── Colors ───────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-# ─── Pre-flight checks ───────────────────────────────────────────────────────
+info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
+ok()      { echo -e "${GREEN}[OK]${NC}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+section() { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 
-check_prerequisites() {
-    print_info "Running pre-flight checks..."
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    # Check oc CLI
-    if ! command -v oc &>/dev/null; then
-        print_error "oc CLI not found. Install from: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/"
-        exit 1
-    fi
-
-    # Check cluster connection
-    if ! oc whoami &>/dev/null; then
-        print_error "Not logged into an OpenShift cluster. Run: oc login ..."
-        exit 1
-    fi
-
-    # Check for cluster-admin or sufficient privileges
-    local user
-    user=$(oc whoami)
-    print_info "Logged in as: ${user}"
-
-    # Check if OpenEMR is deployed
-    if ! oc get namespace "${OPENEMR_NAMESPACE}" &>/dev/null; then
-        print_error "Namespace '${OPENEMR_NAMESPACE}' not found. Deploy OpenEMR first."
-        print_info "See: https://github.com/ryannix123/openemr-on-openshift"
-        exit 1
-    fi
-
-    if ! oc get deployment openemr -n "${OPENEMR_NAMESPACE}" &>/dev/null; then
-        print_error "OpenEMR deployment not found in '${OPENEMR_NAMESPACE}'. Deploy OpenEMR first."
-        exit 1
-    fi
-
-    print_success "Pre-flight checks passed"
-}
-
-# ─── Operator installation check ─────────────────────────────────────────────
-
-check_operators() {
-    print_info "Checking required operators..."
-
-    local missing=0
-
-    # Check for OpenShift Service Mesh operator
-    if oc get csv -n openshift-operators 2>/dev/null | grep -q "servicemeshoperator"; then
-        print_success "OpenShift Service Mesh operator: installed"
+# Wait for an OLM CSV to reach Succeeded phase
+# Usage: wait_for_csv <namespace> <name-prefix> <timeout-seconds>
+wait_for_csv() {
+  local ns="$1" prefix="$2" timeout="$3"
+  info "Waiting for CSV '${prefix}' in '${ns}' to succeed (timeout: ${timeout}s)..."
+  local elapsed=0 interval=10 csv_name phase
+  while [[ $elapsed -lt $timeout ]]; do
+    csv_name=$(oc get csv -n "$ns" --no-headers 2>/dev/null \
+      | awk -v p="$prefix" '$1 ~ p {print $1}' | head -1)
+    if [[ -n "$csv_name" ]]; then
+      phase=$(oc get csv "$csv_name" -n "$ns" \
+        -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+      if [[ "$phase" == "Succeeded" ]]; then
+        ok "CSV '${csv_name}' Succeeded."
+        return 0
+      fi
+      info "  ${csv_name}: ${phase:-Pending} (${elapsed}s)"
     else
-        print_warning "OpenShift Service Mesh operator: NOT installed"
-        echo "    Install from OperatorHub: Red Hat OpenShift Service Mesh"
-        missing=1
+      info "  Waiting for '${prefix}' CSV to appear... (${elapsed}s)"
     fi
-
-    # Check for Kiali operator
-    if oc get csv -n openshift-operators 2>/dev/null | grep -q "kiali"; then
-        print_success "Kiali operator: installed"
-    else
-        print_warning "Kiali operator: NOT installed"
-        echo "    Install from OperatorHub: Kiali Operator (provided by Red Hat)"
-        missing=1
-    fi
-
-    # Check for Jaeger/Tempo operator
-    if oc get csv -n openshift-operators 2>/dev/null | grep -q -E "jaeger|tempo"; then
-        print_success "Tracing operator: installed"
-    else
-        print_warning "Tracing operator: NOT installed"
-        echo "    Install from OperatorHub: Red Hat OpenShift distributed tracing platform"
-        missing=1
-    fi
-
-    if [[ $missing -eq 1 ]]; then
-        echo ""
-        print_error "Required operators are missing. Install them from OperatorHub and re-run."
-        print_info "See README.md for installation instructions."
-        exit 1
-    fi
-
-    print_success "All required operators installed"
+    sleep $interval
+    elapsed=$((elapsed + interval))
+  done
+  error "Timed out waiting for CSV '${prefix}' after ${timeout}s."
 }
 
-# ─── Deploy Service Mesh control plane ────────────────────────────────────────
-
-deploy_control_plane() {
-    print_info "Deploying Service Mesh control plane..."
-
-    # Create istio-system namespace if it doesn't exist
-    if ! oc get namespace istio-system &>/dev/null; then
-        oc create namespace istio-system
-        print_success "Created istio-system namespace"
-    fi
-
-    # Apply SMCP
-    oc apply -f "${MANIFESTS_DIR}/01-smcp.yaml"
-    print_info "ServiceMeshControlPlane applied. Waiting for readiness..."
-
-    # Wait for control plane to be ready (up to 5 minutes)
-    local retries=30
-    local i=0
-    while [[ $i -lt $retries ]]; do
-        local status
-        status=$(oc get smcp basic -n istio-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
-        if [[ "$status" == "True" ]]; then
-            print_success "Service Mesh control plane is ready"
-            break
-        fi
-        echo -n "."
-        sleep 10
-        ((i++))
-    done
-
-    if [[ $i -eq $retries ]]; then
-        print_warning "Control plane is still initializing. Check: oc get smcp basic -n istio-system"
-        print_info "Continuing — it may take a few more minutes..."
-    fi
-
-    # Apply SMMR
-    oc apply -f "${MANIFESTS_DIR}/02-smmr.yaml"
-    print_success "ServiceMeshMemberRoll applied — '${OPENEMR_NAMESPACE}' enrolled in mesh"
+# Wait for a CRD to exist
+wait_for_crd() {
+  local crd="$1"
+  local elapsed=0 interval=5
+  info "Waiting for CRD '${crd}'..."
+  while ! oc get crd "$crd" &>/dev/null; do
+    sleep $interval
+    elapsed=$((elapsed + interval))
+    [[ $elapsed -gt 120 ]] && error "Timed out waiting for CRD '${crd}'."
+  done
+  ok "CRD '${crd}' available."
 }
 
-# ─── Enable sidecar injection ─────────────────────────────────────────────────
+# ── Step 1: Preflight ─────────────────────────────────────────────────────────
+preflight() {
+  section "Preflight Checks"
 
-enable_sidecar_injection() {
-    print_info "Enabling sidecar injection on OpenEMR deployments..."
+  oc auth can-i create namespaces --all-namespaces &>/dev/null \
+    || error "cluster-admin required. Developer Sandbox will not work — use SNO or a full cluster."
+  ok "cluster-admin confirmed."
 
-    for deploy in openemr mariadb redis; do
-        if oc get deployment "${deploy}" -n "${OPENEMR_NAMESPACE}" &>/dev/null; then
-            oc patch deployment "${deploy}" -n "${OPENEMR_NAMESPACE}" \
-                --type merge \
-                -p '{"spec":{"template":{"metadata":{"annotations":{"sidecar.istio.io/inject":"true"}}}}}'
-            print_success "Sidecar injection enabled: ${deploy}"
-        else
-            print_warning "Deployment '${deploy}' not found — skipping"
-        fi
-    done
+  command -v oc &>/dev/null || error "'oc' not found in PATH."
+  ok "oc CLI found."
 
-    print_info "Pods will restart with Envoy sidecars..."
-    oc rollout status deployment/openemr -n "${OPENEMR_NAMESPACE}" --timeout=120s 2>/dev/null || true
+  local cni
+  cni=$(oc get network.config/cluster -o jsonpath='{.spec.networkType}' 2>/dev/null || echo "unknown")
+  if [[ "$cni" != "OVNKubernetes" ]]; then
+    warn "CNI is '${cni}' — EgressFirewall requires OVNKubernetes. Egress step will be skipped."
+    SKIP_EGRESS=true
+  else
+    SKIP_EGRESS=false
+    ok "OVN-Kubernetes CNI confirmed."
+  fi
+
+  oc get catalogsource redhat-operators -n openshift-marketplace &>/dev/null \
+    || warn "CatalogSource 'redhat-operators' not found — operator install may fail on disconnected clusters."
 }
 
-# ─── Apply security policies ─────────────────────────────────────────────────
+# ── Step 2: Gateway API CRDs ─────────────────────────────────────────────────
+install_gateway_api_crds() {
+  section "Gateway API CRDs"
 
-apply_security_policies() {
-    print_info "Applying zero-trust security policies..."
+  if oc get crd gateways.gateway.networking.k8s.io &>/dev/null; then
+    ok "Gateway API CRDs already installed — skipping."
+    return
+  fi
 
-    # mTLS
-    oc apply -f "${MANIFESTS_DIR}/03-peer-authentication.yaml"
-    print_success "PeerAuthentication: strict mTLS enforced"
+  info "Installing Gateway API CRDs (${GATEWAY_API_VERSION})..."
+  oc apply -f "${GATEWAY_API_URL}" \
+    || error "Failed to apply Gateway API CRDs. Check network access to github.com."
 
-    # Authorization policies
-    oc apply -f "${MANIFESTS_DIR}/04-authz-deny-all.yaml"
-    print_success "AuthorizationPolicy: default deny-all"
-
-    oc apply -f "${MANIFESTS_DIR}/05-authz-allow-ingress-openemr.yaml"
-    print_success "AuthorizationPolicy: allow ingress → OpenEMR"
-
-    oc apply -f "${MANIFESTS_DIR}/06-authz-allow-openemr-mariadb.yaml"
-    print_success "AuthorizationPolicy: allow OpenEMR → MariaDB"
-
-    oc apply -f "${MANIFESTS_DIR}/07-authz-allow-openemr-redis.yaml"
-    print_success "AuthorizationPolicy: allow OpenEMR → Redis"
-
-    # Network policies (defense-in-depth)
-    oc apply -f "${MANIFESTS_DIR}/08-network-policies.yaml"
-    print_success "NetworkPolicies: L3/L4 isolation applied"
-
-    # Sidecar scope limiting
-    oc apply -f "${MANIFESTS_DIR}/10-sidecars.yaml"
-    print_success "Sidecar: proxy scope limited per workload"
+  wait_for_crd "gateways.gateway.networking.k8s.io"
+  wait_for_crd "httproutes.gateway.networking.k8s.io"
+  ok "Gateway API CRDs installed."
 }
 
-# ─── Apply egress firewall ────────────────────────────────────────────────────
+# ── Step 3: Operators via OLM ────────────────────────────────────────────────
+install_operators() {
+  section "Operator Installation (OLM)"
 
-apply_egress_firewall() {
-    print_info "Applying egress firewall..."
+  # Sail Operator (OSSM 3)
+  if oc get subscription servicemeshoperator3 -n openshift-operators &>/dev/null; then
+    ok "Sail Operator subscription already exists — skipping."
+  else
+    info "Creating Sail Operator subscription..."
+    oc apply -f "${MANIFESTS_DIR}/00-sail-operator.yaml"
+    ok "Sail Operator subscription created."
+  fi
+  wait_for_csv "openshift-operators" "servicemeshoperator3" "$OLM_TIMEOUT"
+  wait_for_crd "istioes.sailoperator.io"
+  wait_for_crd "istiocnis.sailoperator.io"
 
-    # Check if OVN-Kubernetes is the CNI
-    local cni
-    cni=$(oc get network.config/cluster -o jsonpath='{.spec.networkType}' 2>/dev/null || echo "Unknown")
+  # Kiali Operator — apply Subscription document only (not the Kiali CR yet)
+  if oc get subscription kiali-ossm -n openshift-operators &>/dev/null; then
+    ok "Kiali Operator subscription already exists — skipping."
+  else
+    info "Creating Kiali Operator subscription..."
+    oc apply -f <(awk 'p && /^---/{exit} /kind: Subscription/{p=1} p' \
+      "${MANIFESTS_DIR}/00-kiali-operator.yaml")
+    ok "Kiali Operator subscription created."
+  fi
+  wait_for_csv "openshift-operators" "kiali-ossm" "$OLM_TIMEOUT"
+  wait_for_crd "kialis.kiali.io"
 
-    if [[ "$cni" != "OVNKubernetes" ]]; then
-        print_warning "CNI is '${cni}', not OVN-Kubernetes. EgressFirewall may not work."
-        print_info "Skipping egress firewall. Apply manually if your CNI supports it."
-        return
-    fi
-
-    oc apply -f "${MANIFESTS_DIR}/09-egress-firewall.yaml"
-    print_success "EgressFirewall: outbound traffic restricted to allow-list only"
+  ok "All operators ready."
 }
 
-# ─── NetworkPolicy-only mode ─────────────────────────────────────────────────
+# ── Step 4: Istio control plane ───────────────────────────────────────────────
+install_control_plane() {
+  section "Istio Control Plane"
 
-apply_network_policies_only() {
-    print_info "Applying NetworkPolicies (no mesh required)..."
-    oc apply -f "${MANIFESTS_DIR}/08-network-policies.yaml"
-    print_success "NetworkPolicies applied"
-    echo ""
-    print_info "This provides L3/L4 pod isolation without requiring the service mesh."
-    print_info "For mTLS and L7 authorization, run: $0 --full"
+  oc get ns "$ISTIO_NS" &>/dev/null || oc create ns "$ISTIO_NS"
+  oc get ns "$CNI_NS"   &>/dev/null || oc create ns "$CNI_NS"
+
+  info "Deploying IstioCNI (ztunnel DaemonSet)..."
+  oc apply -f "${MANIFESTS_DIR}/02-istiocni.yaml"
+
+  info "Deploying Istio CR (ambient profile)..."
+  oc apply -f "${MANIFESTS_DIR}/01-istio.yaml"
+
+  info "Waiting for Istio CR to become Ready (this takes 2–3 minutes)..."
+  oc wait istio/default -n "$ISTIO_NS" \
+    --for=condition=Ready --timeout=180s \
+    || error "Istio CR not Ready. Debug: oc describe istio/default -n ${ISTIO_NS}"
+
+  info "Waiting for ztunnel rollout..."
+  oc rollout status daemonset/ztunnel -n "$ISTIO_NS" --timeout=120s
+
+  info "Waiting for Istiod rollout..."
+  oc rollout status deployment/istiod -n "$ISTIO_NS" --timeout=120s
+
+  ok "Control plane ready."
 }
 
-# ─── Status ───────────────────────────────────────────────────────────────────
+# ── Step 5: Enroll namespace ──────────────────────────────────────────────────
+enroll_namespace() {
+  section "Namespace Enrollment"
 
+  oc get ns "$NAMESPACE" &>/dev/null || oc create ns "$NAMESPACE"
+  oc label ns "$NAMESPACE" istio.io/dataplane-mode=ambient --overwrite
+  ok "Namespace '${NAMESPACE}' labeled. ztunnel will intercept pods without restarts."
+}
+
+# ── Step 6: Waypoint proxy ────────────────────────────────────────────────────
+deploy_waypoint() {
+  section "Waypoint Proxy"
+
+  info "Creating waypoint Gateway for L7 policy enforcement..."
+  oc apply -f "${MANIFESTS_DIR}/04-waypoint.yaml"
+
+  oc wait gateway/waypoint -n "$NAMESPACE" \
+    --for=condition=Programmed --timeout=90s \
+    || warn "Waypoint not Programmed yet. Check: oc describe gateway/waypoint -n ${NAMESPACE}"
+
+  ok "Waypoint proxy ready."
+}
+
+# ── Step 7: AuthorizationPolicies ─────────────────────────────────────────────
+apply_policies() {
+  section "AuthorizationPolicies"
+  oc apply -f "${MANIFESTS_DIR}/05-authz-policies.yaml"
+  ok "AuthorizationPolicies applied."
+  warn "  Default-deny is now active. Verify OpenEMR can reach MariaDB and Redis."
+}
+
+# ── Step 8: NetworkPolicies ───────────────────────────────────────────────────
+apply_netpol() {
+  section "NetworkPolicies"
+  oc apply -f "${MANIFESTS_DIR}/06-network-policies.yaml"
+  ok "NetworkPolicies applied."
+}
+
+# ── Step 9: EgressFirewall ────────────────────────────────────────────────────
+apply_egress() {
+  section "EgressFirewall"
+  if [[ "${SKIP_EGRESS:-false}" == "true" ]]; then
+    warn "Skipping — requires OVNKubernetes CNI."
+    return
+  fi
+  oc apply -f "${MANIFESTS_DIR}/07-egress-firewall.yaml"
+  ok "EgressFirewall applied."
+}
+
+# ── Step 10: Kiali ────────────────────────────────────────────────────────────
+deploy_kiali() {
+  section "Kiali"
+
+  info "Creating Kiali instance in ${ISTIO_NS}..."
+  oc apply -f <(awk '/kind: Kiali/{p=1} p' "${MANIFESTS_DIR}/00-kiali-operator.yaml")
+
+  info "Waiting for Kiali deployment..."
+  oc rollout status deployment/kiali -n "$ISTIO_NS" --timeout=120s \
+    || warn "Kiali not yet ready. Check: oc get pod -n ${ISTIO_NS} -l app=kiali"
+
+  local kiali_url
+  kiali_url=$(oc get route kiali -n "$ISTIO_NS" \
+    -o jsonpath='{.spec.host}' 2>/dev/null || echo "route pending")
+  ok "Kiali: https://${kiali_url}"
+}
+
+# ── Status ────────────────────────────────────────────────────────────────────
 show_status() {
-    echo ""
-    echo "═══════════════════════════════════════════════════════════════"
-    echo " Service Mesh Status"
-    echo "═══════════════════════════════════════════════════════════════"
-    echo ""
+  echo ""
+  echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════${NC}"
+  echo -e "${BOLD}${CYAN}  OpenEMR Ambient Mesh Status${NC}"
+  echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════${NC}"
 
-    # Control plane
-    echo "── Control Plane ──"
-    oc get smcp -n istio-system 2>/dev/null || echo "No SMCP found"
-    echo ""
+  echo ""
+  echo "▶ Sail Operator CSV:"
+  oc get csv -n openshift-operators --no-headers 2>/dev/null \
+    | awk '/servicemeshoperator3/ {printf "  %-50s %s\n", $1, $7}' \
+    || echo "  Not found"
 
-    # Member roll
-    echo "── Member Roll ──"
-    oc get smmr -n istio-system 2>/dev/null || echo "No SMMR found"
-    echo ""
+  echo ""
+  echo "▶ Istio control plane:"
+  oc get istio/default -n "$ISTIO_NS" --no-headers 2>/dev/null \
+    | awk '{printf "  %-30s %s\n", $1, $2}' || echo "  Not found"
 
-    # Pods with sidecars
-    echo "── Pods (look for 2/2 Ready = sidecar injected) ──"
-    oc get pods -n "${OPENEMR_NAMESPACE}" -o wide 2>/dev/null
-    echo ""
+  echo ""
+  echo "▶ ztunnel DaemonSet:"
+  oc get daemonset/ztunnel -n "$ISTIO_NS" --no-headers 2>/dev/null \
+    | awk '{printf "  desired=%-4s ready=%-4s\n", $2, $4}' || echo "  Not found"
 
-    # Policies
-    echo "── Authorization Policies ──"
-    oc get authorizationpolicy -n "${OPENEMR_NAMESPACE}" 2>/dev/null || echo "None"
-    echo ""
+  echo ""
+  echo "▶ Namespace label:"
+  oc get ns "$NAMESPACE" -o jsonpath='{.metadata.labels.istio\.io/dataplane-mode}' \
+    2>/dev/null | xargs -I{} echo "  {}" || echo "  NOT SET"
 
-    echo "── Peer Authentication ──"
-    oc get peerauthentication -n "${OPENEMR_NAMESPACE}" 2>/dev/null || echo "None"
-    echo ""
+  echo ""
+  echo "▶ Waypoint:"
+  oc get gateway/waypoint -n "$NAMESPACE" --no-headers 2>/dev/null \
+    | awk '{printf "  %-30s %s\n", $1, $3}' || echo "  Not deployed"
 
-    echo "── Network Policies ──"
-    oc get networkpolicy -n "${OPENEMR_NAMESPACE}" 2>/dev/null || echo "None"
-    echo ""
+  echo ""
+  echo "▶ AuthorizationPolicies:"
+  oc get authorizationpolicy -n "$NAMESPACE" --no-headers 2>/dev/null \
+    | awk '{printf "  %s\n", $1}' || echo "  None"
 
-    echo "── Egress Firewall ──"
-    oc get egressfirewall -n "${OPENEMR_NAMESPACE}" 2>/dev/null || echo "None"
-    echo ""
+  echo ""
+  echo "▶ NetworkPolicies:"
+  oc get networkpolicy -n "$NAMESPACE" --no-headers 2>/dev/null \
+    | awk '{printf "  %s\n", $1}' || echo "  None"
 
-    # Kiali URL
-    local kiali_url
-    kiali_url=$(oc get route kiali -n istio-system -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
-    if [[ -n "$kiali_url" ]]; then
-        echo "── Observability ──"
-        echo "  Kiali:   https://${kiali_url}"
-        local jaeger_url
-        jaeger_url=$(oc get route jaeger -n istio-system -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
-        if [[ -n "$jaeger_url" ]]; then
-            echo "  Jaeger:  https://${jaeger_url}"
-        fi
-        local grafana_url
-        grafana_url=$(oc get route grafana -n istio-system -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
-        if [[ -n "$grafana_url" ]]; then
-            echo "  Grafana: https://${grafana_url}"
-        fi
-    fi
-    echo ""
+  echo ""
+  echo "▶ EgressFirewall:"
+  oc get egressfirewall -n "$NAMESPACE" --no-headers 2>/dev/null \
+    | awk '{printf "  %s\n", $1}' || echo "  None"
+
+  echo ""
+  echo "▶ Pod ambient enrollment (should show 'enabled'):"
+  oc get pod -n "$NAMESPACE" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.ambient\.istio\.io/redirection}{"\n"}{end}' \
+    2>/dev/null | awk '{printf "  %-40s %s\n", $1, $2}' \
+    || echo "  No pods found"
+
+  echo ""
+  echo "▶ Kiali:"
+  oc get route kiali -n "$ISTIO_NS" \
+    -o jsonpath='  https://{.spec.host}{"\n"}' 2>/dev/null \
+    || echo "  Not deployed"
+  echo ""
 }
 
-# ─── Cleanup ──────────────────────────────────────────────────────────────────
-
+# ── Cleanup ───────────────────────────────────────────────────────────────────
 cleanup() {
-    print_warning "Removing service mesh configuration from OpenEMR..."
-
-    # Remove sidecar injection annotations
-    for deploy in openemr mariadb redis; do
-        if oc get deployment "${deploy}" -n "${OPENEMR_NAMESPACE}" &>/dev/null; then
-            oc patch deployment "${deploy}" -n "${OPENEMR_NAMESPACE}" \
-                --type json \
-                -p '[{"op":"remove","path":"/spec/template/metadata/annotations/sidecar.istio.io~1inject"}]' 2>/dev/null || true
-            print_info "Removed sidecar annotation: ${deploy}"
-        fi
-    done
-
-    # Remove policies
-    oc delete authorizationpolicy --all -n "${OPENEMR_NAMESPACE}" --ignore-not-found
-    oc delete peerauthentication --all -n "${OPENEMR_NAMESPACE}" --ignore-not-found
-    oc delete networkpolicy --all -n "${OPENEMR_NAMESPACE}" --ignore-not-found
-    oc delete sidecar --all -n "${OPENEMR_NAMESPACE}" --ignore-not-found
-    oc delete egressfirewall --all -n "${OPENEMR_NAMESPACE}" --ignore-not-found
-    print_success "Policies removed"
-
-    # Remove from member roll
-    oc delete smmr default -n istio-system --ignore-not-found
-    print_success "Namespace removed from mesh"
-
-    print_info "Pods will restart without sidecars..."
-    for deploy in openemr mariadb redis; do
-        oc rollout restart deployment/"${deploy}" -n "${OPENEMR_NAMESPACE}" 2>/dev/null || true
-    done
-
-    print_success "Service mesh configuration removed"
-    echo ""
-    print_info "The control plane (istio-system) was left in place."
-    print_info "To remove it: oc delete smcp basic -n istio-system"
+  warn "Removing mesh config from '${NAMESPACE}'..."
+  oc delete -f "${MANIFESTS_DIR}/07-egress-firewall.yaml"  --ignore-not-found
+  oc delete -f "${MANIFESTS_DIR}/06-network-policies.yaml" --ignore-not-found
+  oc delete -f "${MANIFESTS_DIR}/05-authz-policies.yaml"   --ignore-not-found
+  oc delete -f "${MANIFESTS_DIR}/04-waypoint.yaml"          --ignore-not-found
+  oc label ns "$NAMESPACE" istio.io/dataplane-mode- 2>/dev/null || true
+  ok "Mesh config removed. Control plane left intact."
+  echo ""
+  echo "To remove the control plane:"
+  echo "  oc delete kiali/kiali -n ${ISTIO_NS}"
+  echo "  oc delete istio/default -n ${ISTIO_NS}"
+  echo "  oc delete istiocni/default -n ${CNI_NS}"
+  echo "  oc delete namespace ${ISTIO_NS} ${CNI_NS}"
+  echo ""
+  echo "To remove operators:"
+  echo "  oc delete subscription servicemeshoperator3 kiali-ossm -n openshift-operators"
 }
 
-# ─── Usage ────────────────────────────────────────────────────────────────────
-
+# ── Usage ─────────────────────────────────────────────────────────────────────
 usage() {
-    echo "Usage: $0 [OPTION]"
-    echo ""
-    echo "Options:"
-    echo "  --full              Deploy full service mesh (mTLS + AuthZ + NetworkPolicy + Egress)"
-    echo "  --netpol-only       Apply NetworkPolicies only (no mesh operators required)"
-    echo "  --egress-only       Apply EgressFirewall only (requires OVN-Kubernetes)"
-    echo "  --status            Show current mesh and policy status"
-    echo "  --cleanup           Remove all mesh config from OpenEMR namespace"
-    echo "  -h, --help          Show this help"
-    echo ""
-    echo "Environment variables:"
-    echo "  OPENEMR_NAMESPACE   Target namespace (default: openemr)"
-    echo ""
-    echo "Examples:"
-    echo "  $0 --full                                    # Full zero-trust deployment"
-    echo "  $0 --netpol-only                             # Just L3/L4 isolation"
-    echo "  OPENEMR_NAMESPACE=my-emr $0 --full           # Custom namespace"
+  echo ""
+  echo -e "${BOLD}Usage:${NC} $0 [OPTION]"
+  echo ""
+  echo -e "${BOLD}Options:${NC}"
+  echo "  --full           Complete install: operators, CRDs, control plane, policies, Kiali"
+  echo "  --operators      Install Sail + Kiali operators and Gateway API CRDs only"
+  echo "  --control-plane  Deploy Istio CR + IstioCNI (operators must already be installed)"
+  echo "  --policies       Enroll namespace, waypoint, AuthZ + NetworkPolicy + EgressFirewall"
+  echo "  --netpol-only    NetworkPolicies only (no mesh operators required)"
+  echo "  --egress-only    EgressFirewall only"
+  echo "  --status         Show mesh status"
+  echo "  --cleanup        Remove mesh config from namespace (control plane left intact)"
+  echo ""
+  echo -e "${BOLD}Environment:${NC}"
+  echo "  OPENEMR_NAMESPACE    Target namespace (default: openemr)"
+  echo ""
+  echo -e "${BOLD}Typical workflow:${NC}"
+  echo "  $0 --full                              # everything in one shot"
+  echo "  $0 --operators                         # install operators, deploy OpenEMR, then:"
+  echo "  $0 --control-plane && $0 --policies    # bring up mesh + policies"
+  echo ""
 }
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
-
-main() {
-    print_banner
-
-    case "${1:-}" in
-        --full)
-            check_prerequisites
-            check_operators
-            deploy_control_plane
-            enable_sidecar_injection
-            apply_security_policies
-            apply_egress_firewall
-            echo ""
-            print_success "Zero-trust networking deployed!"
-            echo ""
-            echo "What's active:"
-            echo "  ✓ Mutual TLS between all pods (encrypted east-west traffic)"
-            echo "  ✓ Identity-based authorization (only OpenEMR can reach MariaDB/Redis)"
-            echo "  ✓ Default deny-all (no unauthorized traffic flows)"
-            echo "  ✓ L3/L4 NetworkPolicies (defense-in-depth)"
-            echo "  ✓ Envoy proxy scope limited per workload"
-            echo "  ✓ Egress firewall (outbound restricted to allow-list)"
-            echo "  ✓ Kiali, Jaeger, Grafana for observability"
-            echo ""
-            show_status
-            ;;
-        --netpol-only)
-            check_prerequisites
-            apply_network_policies_only
-            ;;
-        --egress-only)
-            check_prerequisites
-            apply_egress_firewall
-            ;;
-        --status)
-            show_status
-            ;;
-        --cleanup)
-            check_prerequisites
-            cleanup
-            ;;
-        -h|--help)
-            usage
-            ;;
-        *)
-            usage
-            exit 1
-            ;;
-    esac
-}
-
-main "$@"
+# ── Main ──────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  --full)
+    preflight
+    install_gateway_api_crds
+    install_operators
+    install_control_plane
+    enroll_namespace
+    deploy_waypoint
+    apply_policies
+    apply_netpol
+    apply_egress
+    deploy_kiali
+    show_status
+    echo -e "${GREEN}${BOLD}Full ambient mesh deployment complete!${NC}"
+    ;;
+  --operators)
+    preflight
+    install_gateway_api_crds
+    install_operators
+    ok "Operators and CRDs ready. Deploy OpenEMR, then run --control-plane."
+    ;;
+  --control-plane)
+    preflight
+    install_control_plane
+    enroll_namespace
+    ok "Control plane ready. Run --policies next."
+    ;;
+  --policies)
+    enroll_namespace
+    deploy_waypoint
+    apply_policies
+    apply_netpol
+    apply_egress
+    ok "All policies applied."
+    ;;
+  --netpol-only)
+    apply_netpol
+    ;;
+  --egress-only)
+    preflight
+    apply_egress
+    ;;
+  --status)
+    show_status
+    ;;
+  --cleanup)
+    cleanup
+    ;;
+  *)
+    usage
+    ;;
+esac

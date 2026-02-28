@@ -1,0 +1,12 @@
+---
+# Enroll the openemr namespace in the ambient mesh by label.
+# No SMMR, no annotation on pods — ztunnel handles L4 transparently.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openemr
+  labels:
+    # This single label enrolls ALL pods in the namespace
+    # into ambient mode — no pod restart required.
+    istio.io/dataplane-mode: ambient
+    kubernetes.io/metadata.name: openemr

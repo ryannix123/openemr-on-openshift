@@ -1,0 +1,19 @@
+---
+# The Sail Operator replaces servicemeshoperator in OSSM 3.
+# It must be installed into openshift-operators (AllNamespaces watch).
+# An OperatorGroup already exists there by default on OpenShift — we only
+# need to create the Subscription.
+#
+# Package name: servicemeshoperator3  (OSSM 3 channel on Red Hat's catalog)
+# If your cluster is disconnected, mirror this package with oc-mirror first.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: servicemeshoperator3
+  namespace: openshift-operators
+spec:
+  channel: stable
+  name: servicemeshoperator3
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

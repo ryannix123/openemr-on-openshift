@@ -1,0 +1,89 @@
+---
+# ──────────────────────────────────────────────────────────────
+# Default DENY — all traffic in the openemr namespace is blocked
+# unless explicitly allowed below.
+# In ambient mode, this is enforced by the waypoint proxy (L7)
+# and by ztunnel (L4). Both layers must pass for traffic to flow.
+# ──────────────────────────────────────────────────────────────
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: openemr
+spec:
+  {} # Empty spec = deny all by default
+
+---
+# ──────────────────────────────────────────────────────────────
+# Allow the OpenShift Router (ingress) to reach the OpenEMR pod.
+# In ambient mode, the router traffic arrives via HBONE through
+# the waypoint. We match on the destination workload, not a gateway.
+# ──────────────────────────────────────────────────────────────
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ingress-to-openemr
+  namespace: openemr
+spec:
+  targetRef:
+    # Targets the waypoint for namespace-wide enforcement
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: waypoint
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            ports: ["8080", "8443"]
+      # No source restriction — router uses a system namespace SA;
+      # restrict by port only. Tighten with JWT/header rules if needed.
+
+---
+# ──────────────────────────────────────────────────────────────
+# Allow OpenEMR → MariaDB (identity-based via SPIFFE/mTLS)
+# The source principal is the SPIFFE ID of the OpenEMR service account.
+# ztunnel validates mutual TLS before the waypoint sees the request.
+# ──────────────────────────────────────────────────────────────
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-openemr-to-mariadb
+  namespace: openemr
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: waypoint
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/openemr/sa/default"
+      to:
+        - operation:
+            ports: ["3306"]
+
+---
+# ──────────────────────────────────────────────────────────────
+# Allow OpenEMR → Redis
+# ──────────────────────────────────────────────────────────────
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-openemr-to-redis
+  namespace: openemr
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: waypoint
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/openemr/sa/default"
+      to:
+        - operation:
+            ports: ["6379"]
