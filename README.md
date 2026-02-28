@@ -1,6 +1,6 @@
 # OpenEMR on OpenShift Developer Sandbox
 
-[![OpenEMR Version](https://img.shields.io/badge/OpenEMR-8.0.0-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE0IDJINmEyIDIgMCAwIDAtMiAydjE2YTIgMiAwIDAgMCAyIDJoMTJhMiAyIDAgMCAwIDItMlY4eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE0IDIgMTQgOCAyMCA4Ij48L3BvbHlsaW5lPjxsaW5lIHgxPSIxNiIgeTE9IjEzIiB4Mj0iOCIgeTI9IjEzIj48L2xpbmU+PGxpbmUgeDE9IjE2IiB5MT0iMTciIHgyPSI4IiB5Mj0iMTciPjwvbGluZT48cG9seWxpbmUgcG9pbnRzPSIxMCA5IDkgOSA4IDkiPjwvcG9seWxpbmU+PC9zdmc+)](https://www.open-emr.org/)
+[![OpenEMR Version](https://img.shields.io/badge/OpenEMR-8.0.0-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE0IDJINmEyIDIgMCAwIDAtMiAydjE2YTIgMiAwIDAgMCAyIDJoMTJhMiAyIDIgMCAwIDAtMlY4eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE0IDIgMTQgOCAyMCA4Ij48L3BvbHlsaW5lPjxsaW5lIHgxPSIxNiIgeTE9IjEzIiB4Mj0iOCIgeTI9IjEzIj48L2xpbmU+PGxpbmUgeDE9IjE2IiB5MT0iMTciIHgyPSI4IiB5Mj0iMTciPjwvbGluZT48cG9seWxpbmUgcG9pbnRzPSIxMCA5IDkgOSA4IDkiPjwvcG9seWxpbmU+PC9zdmc+)](https://www.open-emr.org/)
 [![PHP Version](https://img.shields.io/badge/PHP-8.5-777BB4?style=flat-square&logo=php&logoColor=white)](https://www.php.net/)
 [![MariaDB Version](https://img.shields.io/badge/MariaDB-11.8-003545?style=flat-square&logo=mariadb&logoColor=white)](https://mariadb.org/)
 [![Redis Version](https://img.shields.io/badge/Redis-8-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io/)
@@ -184,10 +184,12 @@ Or use the pre-built image: `quay.io/ryan_nix/openemr-openshift:latest`
 
 ### 3. Configure the Deployment (Optional)
 
-Both deployment methods are pre-configured for Developer Sandbox with sensible defaults:
+The script is pre-configured for Developer Sandbox with sensible defaults:
 - Storage: `gp3` (default Developer Sandbox storage class)
 - Database: 5Gi
 - Documents: 10Gi
+
+You can optionally adjust these in `deploy-openemr.sh` if needed, but defaults work well for most cases.
 
 ### 4. Login to OpenShift Developer Sandbox
 
@@ -198,77 +200,23 @@ oc login --token=sha256~xxxxx --server=https://api.sandbox.xxxxx.openshiftapps.c
 
 ### 5. Deploy OpenEMR
 
-Two deployment methods are available — choose whichever fits your environment.
-
----
-
-#### Option A — Shell Script
-
-The quickest path. Requires bash (Linux, macOS, or WSL on Windows).
-
 ```bash
 chmod +x deploy-openemr.sh
 ./deploy-openemr.sh
 ```
 
-| Command | Description |
-|---------|-------------|
-| `./deploy-openemr.sh` | Deploy OpenEMR |
-| `./deploy-openemr.sh --status` | Check deployment status |
-| `./deploy-openemr.sh --cleanup` | Remove all resources (deletes data) |
-
----
-
-#### Option B — Ansible Playbook
-
-Platform-agnostic alternative that runs on macOS, Linux, or any system with Python — **no WSL required**. Also compatible with Ansible Automation Platform (AAP) / Tower.
-
-**Install prerequisites:**
-
-```bash
-pip install ansible kubernetes
-ansible-galaxy collection install kubernetes.core
-```
-
-**Run the playbook:**
-
-```bash
-cd ansible/
-ansible-playbook deploy-openemr.yml
-```
-
-| Command | Description |
-|---------|-------------|
-| `ansible-playbook deploy-openemr.yml` | Deploy OpenEMR |
-| `ansible-playbook deploy-openemr.yml -e "action=status"` | Check deployment status |
-| `ansible-playbook deploy-openemr.yml -e "action=cleanup"` | Remove all resources (deletes data) |
-
-**Common overrides:**
-
-```bash
-# Use a different storage class (e.g. ODF/Ceph on a full cluster)
-ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
-
-# Pin the admin password instead of auto-generating one
-ansible-playbook deploy-openemr.yml -e "oe_admin_password=MySecurePass123"
-
-# Use a custom vars file for environment-specific settings
-ansible-playbook deploy-openemr.yml -e "@vars/prod.yml"
-```
-
-All tunables — images, storage class, resource limits, timeouts, and output paths — are managed in `ansible/vars/main.yml`. See the [Ansible README](ansible/README.md) for full details.
-
-> **Re-runs are safe.** The playbook detects existing Secrets and preserves passwords rather than regenerating them on subsequent runs.
-
----
+The script will:
+1. Create the OpenShift project
+2. Deploy MariaDB with persistent storage
+3. Deploy OpenEMR application
+4. Create routes for external access
+5. Display access credentials
 
 ### 6. Complete OpenEMR Setup
 
-Both methods produce the same result. After deployment:
-
-1. Navigate to the URL shown in the deployment summary
-2. Wait 2–3 minutes for OpenEMR's auto-configuration to complete
-3. Log in with the admin credentials saved to `openemr-credentials.txt`
+1. Navigate to the URL provided in the deployment summary
+2. Follow the OpenEMR setup wizard
+3. Use the database credentials from `openemr-credentials.txt`
 
 ## Configuration
 
@@ -406,13 +354,9 @@ php -r "mysqli_connect('mariadb', 'openemr', 'password', 'openemr') or die(mysql
 To completely remove and redeploy:
 
 ```bash
-# Shell script
-./deploy-openemr.sh --cleanup
+oc delete project openemr
+# Wait for project to fully delete, then re-run:
 ./deploy-openemr.sh
-
-# Ansible
-ansible-playbook ansible/deploy-openemr.yml -e "action=cleanup"
-ansible-playbook ansible/deploy-openemr.yml
 ```
 
 ## Security Considerations
@@ -479,77 +423,98 @@ For production healthcare deployments:
      pod-security.kubernetes.io/warn=restricted
    ```
 
-## Maintenance
+## Service Mesh — Zero Trust Networking
 
-### Backup
+The `service-mesh/` sub-project adds a zero-trust networking layer using **OpenShift Service Mesh 3 (OSSM 3) in ambient mode**. This is an optional but strongly recommended addition for any environment handling real patient data.
 
-**Database backup:**
+### Why Service Mesh for a Healthcare Workload?
+
+The base deployment secures the perimeter — TLS on the route, resource isolation via namespaces — but by default, pod-to-pod traffic inside the cluster is unencrypted and unrestricted. Any workload that gains a foothold in the `openemr` namespace can freely connect to MariaDB or Redis and sniff credentials or patient data in transit. The service mesh closes this gap.
+
+### What OSSM 3 Ambient Mode Adds
+
+| Layer | What It Does |
+|-------|-------------|
+| **Automatic mTLS (ztunnel)** | All pod-to-pod traffic is encrypted and mutually authenticated without any changes to OpenEMR, MariaDB, or Redis |
+| **Identity-based AuthorizationPolicies** | Only OpenEMR's service account identity can reach MariaDB (port 3306) and Redis (port 6379) — no other pod can connect regardless of IP |
+| **Waypoint Proxy** | Enforces L7 policies via an Envoy-based proxy deployed per namespace, required for fine-grained HTTP-level controls |
+| **NetworkPolicies** | L3/L4 isolation enforced by OVN-Kubernetes independent of the mesh — defense in depth |
+| **EgressFirewall** | Pods may only initiate outbound connections to an explicit allow-list; a compromised pod cannot phone home |
+
+### Ambient Mode vs. Traditional Sidecar (OSSM 2.x)
+
+OSSM 3 uses a fundamentally different architecture. Instead of injecting an Envoy sidecar into every pod (which requires pod restarts and shows as `2/2` containers), ambient mode deploys a `ztunnel` DaemonSet that intercepts traffic at the Linux network namespace level on each node. Pods remain `1/1` and are enrolled simply by labeling the namespace — no rollout required. A separate waypoint proxy handles L7 policy enforcement only where needed.
+
+> **Requirement**: OSSM 3 requires cluster-admin access to install the Sail Operator and the `IstioCNI` DaemonSet. It is **not compatible with the Developer Sandbox**. Use a full OpenShift cluster or Single Node OpenShift (SNO).
+
+### Quick Start
+
 ```bash
-# Create database dump
-oc exec -it statefulset/mariadb -n openemr -- \
-  mysqldump -u root -p"$DB_ROOT_PASSWORD" openemr > openemr-backup-$(date +%Y%m%d).sql
+cd service-mesh/
+chmod +x deploy-mesh.sh
+
+# Full install: operators, control plane, policies, Kiali
+./deploy-mesh.sh --full
+
+# Or step by step — useful if OpenEMR is already deployed:
+./deploy-mesh.sh --operators      # Install Sail + Kiali operators, Gateway API CRDs
+./deploy-mesh.sh --control-plane  # Deploy Istio + ztunnel
+./deploy-mesh.sh --policies       # Enroll namespace, waypoint, AuthZ, NetworkPolicy, Egress
+
+# Check status at any point
+./deploy-mesh.sh --status
 ```
 
-**Document backup:**
-```bash
-# Backup documents PVC
-oc rsync openemr-pod:/var/www/html/openemr/sites/default/documents ./backup/documents/
-```
-
-### Updates
-
-**Update OpenEMR container:**
-```bash
-# Build new version
-podman build -t quay.io/ryan_nix/openemr-openshift:7.0.6 .
-podman push quay.io/ryan_nix/openemr-openshift:7.0.6
-
-# Update deployment
-oc set image deployment/openemr \
-  openemr=quay.io/ryan_nix/openemr-openshift:7.0.6 -n openemr
-```
+See [`service-mesh/README.md`](service-mesh/README.md) for the full deployment guide, manifest reference, HIPAA alignment table, and troubleshooting steps.
 
 ## Project Structure
 
 ```
 openemr-on-openshift/
-├── Containerfile              # Container build instructions
-├── deploy-openemr.sh          # Shell script deployment (bash/WSL)
-├── README.md                  # This file
-├── .containerignore           # Files to ignore during build
-├── ansible/                   # Ansible deployment (platform-agnostic)
-│   ├── deploy-openemr.yml     # Main playbook
-│   ├── vars/
-│   │   └── main.yml           # All tunables (images, storage, resources)
-│   └── README.md              # Ansible-specific documentation
-└── manifests/                 # (Optional) Individual YAML files
-    ├── deployment.yaml
-    ├── service.yaml
-    ├── route.yaml
-    └── mariadb/
-        ├── statefulset.yaml
-        └── service.yaml
+├── Containerfile                  # Container build instructions
+├── deploy-openemr.sh              # Automated deployment script
+├── README.md                      # This file
+├── .containerignore               # Files to ignore during build
+├── manifests/                     # Individual YAML manifests
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   ├── route.yaml
+│   └── mariadb/
+│       ├── statefulset.yaml
+│       └── service.yaml
+└── service-mesh/                  # Zero-trust networking sub-project (OSSM 3)
+    ├── README.md                  # Service mesh deployment guide
+    ├── deploy-mesh.sh             # Operator + mesh deployment script
+    └── manifests/
+        ├── 00-sail-operator.yaml  # Sail Operator subscription (OLM)
+        ├── 00-kiali-operator.yaml # Kiali Operator subscription + Kiali CR
+        ├── 01-istio.yaml          # Istio CR (ambient profile)
+        ├── 02-istiocni.yaml       # IstioCNI CR (ztunnel DaemonSet)
+        ├── 03-namespace.yaml      # Namespace with ambient enrollment label
+        ├── 04-waypoint.yaml       # Waypoint proxy (L7 policy enforcement)
+        ├── 05-authz-policies.yaml # AuthorizationPolicies (default-deny + allows)
+        ├── 06-network-policies.yaml # NetworkPolicies (L3/L4 CNI isolation)
+        └── 07-egress-firewall.yaml  # EgressFirewall (OVN-Kubernetes)
 ```
 
 ## Contributing
 
 Contributions are welcome! Areas for improvement:
 
-- [x] Ansible playbook deployment
-- [ ] Service Mesh - Istio
 - [ ] Helm chart version
 - [ ] GitOps/ArgoCD manifests
 - [ ] Automated database migrations
 - [ ] Prometheus metrics exporters
 - [ ] Custom Operator
-- [x] Secure namespace/multi-tenancy support (Works out-of-the-box with OpenShift)
+- [ ] Multi-tenancy support
 
 ## Resources
 
 - [OpenEMR Official Site](https://www.open-emr.org/)
 - [OpenEMR Documentation](https://www.open-emr.org/wiki/index.php/OpenEMR_Wiki_Home_Page)
 - [Red Hat OpenShift Documentation](https://docs.openshift.com/)
-- [Red Hat OpenShift Developer Sandbox](https://developers.redhat.com/developer-sandbox)
+- [OpenShift Service Mesh 3 Documentation](https://docs.openshift.com/container-platform/latest/service_mesh/v3x/ossm-about.html)
+- [OpenShift Data Foundation](https://www.redhat.com/en/technologies/cloud-computing/openshift-data-foundation)
 
 ## License
 
