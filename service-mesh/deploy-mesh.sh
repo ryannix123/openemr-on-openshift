@@ -2,17 +2,20 @@
 # deploy-mesh.sh — OpenEMR Service Mesh (OpenShift Service Mesh 3, Ambient Mode)
 # Author: Ryan Nix <ryan.nix@gmail.com>
 #
-# This script is fully self-contained. Running --full will:
+# Fully self-contained. Running --full will:
 #   1. Install the Sail Operator (OSSM 3) via OLM
 #   2. Install the Kiali Operator via OLM
 #   3. Install Gateway API CRDs (required for waypoint proxy)
 #   4. Deploy the Istio control plane and IstioCNI (ztunnel)
-#   5. Enroll the openemr namespace in ambient mode
+#   5. Enroll the target namespace in ambient mode
 #   6. Deploy the waypoint proxy for L7 policy enforcement
 #   7. Apply zero-trust AuthorizationPolicies
 #   8. Apply NetworkPolicies (L3/L4, no mesh dependency)
 #   9. Apply EgressFirewall (OVN-Kubernetes)
 #  10. Deploy a Kiali instance for observability
+#
+# The OPENEMR_NAMESPACE variable controls which namespace is targeted.
+# All manifest files are templated at apply time — no static files are modified.
 #
 # Prerequisites: oc CLI, cluster-admin access, internet or mirrored catalog
 set -euo pipefail
@@ -23,11 +26,9 @@ ISTIO_NS="istio-system"
 CNI_NS="istio-cni"
 MANIFESTS_DIR="$(cd "$(dirname "$0")/manifests" && pwd)"
 
-# Gateway API version to install (standard channel)
 GATEWAY_API_VERSION="v1.1.0"
 GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
-# OLM readiness timeout in seconds
 OLM_TIMEOUT=300
 
 # ── Colors ───────────────────────────────────────────────────────────────────
@@ -40,10 +41,42 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 
+# ── Namespace templating ──────────────────────────────────────────────────────
+#
+# All manifest files use "openemr" as the placeholder namespace. Rather than
+# maintaining separate copies or modifying files on disk, every oc apply call
+# is piped through this function which substitutes the target namespace at
+# runtime. The static YAML files are never modified.
+#
+# Substitutions performed:
+#   namespace: openemr            → namespace: <NAMESPACE>
+#   name: openemr  (ns object)    → name: <NAMESPACE>
+#   kubernetes.io/metadata.name   → updated label on the namespace object
+#   /ns/openemr/  (SPIFFE URIs)   → /ns/<NAMESPACE>/
+#   - openemr  (Kiali list entry) → - <NAMESPACE>
+#
+# app: openemr labels are intentionally left unchanged — they are pod label
+# selectors that refer to the OpenEMR application, not the namespace name.
+#
+render() {
+  local file="$1"
+  sed \
+    -e "s|namespace: openemr|namespace: ${NAMESPACE}|g" \
+    -e "s|/ns/openemr/|/ns/${NAMESPACE}/|g" \
+    -e "s|kubernetes\.io/metadata\.name: openemr|kubernetes.io/metadata.name: ${NAMESPACE}|g" \
+    -e "/^  name: openemr$/s|openemr|${NAMESPACE}|g" \
+    -e "s|      - openemr$|      - ${NAMESPACE}|g" \
+    "$file"
+}
+
+# Render a manifest and apply it. Accepts the same flags as oc apply.
+apply_manifest() {
+  local file="$1"; shift
+  render "$file" | oc apply -f - "$@"
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Wait for an OLM CSV to reach Succeeded phase
-# Usage: wait_for_csv <namespace> <name-prefix> <timeout-seconds>
 wait_for_csv() {
   local ns="$1" prefix="$2" timeout="$3"
   info "Waiting for CSV '${prefix}' in '${ns}' to succeed (timeout: ${timeout}s)..."
@@ -68,7 +101,6 @@ wait_for_csv() {
   error "Timed out waiting for CSV '${prefix}' after ${timeout}s."
 }
 
-# Wait for a CRD to exist
 wait_for_crd() {
   local crd="$1"
   local elapsed=0 interval=5
@@ -92,6 +124,14 @@ preflight() {
   command -v oc &>/dev/null || error "'oc' not found in PATH."
   ok "oc CLI found."
 
+  # Verify OpenEMR namespace exists (warn if not, don't block — user may be
+  # doing a staged install where OpenEMR is deployed after --operators)
+  if oc get ns "$NAMESPACE" &>/dev/null; then
+    ok "Target namespace '${NAMESPACE}' exists."
+  else
+    warn "Namespace '${NAMESPACE}' does not exist yet — it will be created during enrollment."
+  fi
+
   local cni
   cni=$(oc get network.config/cluster -o jsonpath='{.spec.networkType}' 2>/dev/null || echo "unknown")
   if [[ "$cni" != "OVNKubernetes" ]]; then
@@ -104,6 +144,8 @@ preflight() {
 
   oc get catalogsource redhat-operators -n openshift-marketplace &>/dev/null \
     || warn "CatalogSource 'redhat-operators' not found — operator install may fail on disconnected clusters."
+
+  info "Target namespace: ${NAMESPACE}"
 }
 
 # ── Step 2: Gateway API CRDs ─────────────────────────────────────────────────
@@ -128,11 +170,12 @@ install_gateway_api_crds() {
 install_operators() {
   section "Operator Installation (OLM)"
 
-  # Sail Operator (OSSM 3)
+  # Sail Operator
   if oc get subscription servicemeshoperator3 -n openshift-operators &>/dev/null; then
     ok "Sail Operator subscription already exists — skipping."
   else
     info "Creating Sail Operator subscription..."
+    # 00-sail-operator.yaml has no namespace references to template — apply directly
     oc apply -f "${MANIFESTS_DIR}/00-sail-operator.yaml"
     ok "Sail Operator subscription created."
   fi
@@ -140,13 +183,14 @@ install_operators() {
   wait_for_crd "istioes.sailoperator.io"
   wait_for_crd "istiocnis.sailoperator.io"
 
-  # Kiali Operator — apply Subscription document only (not the Kiali CR yet)
+  # Kiali Operator — Subscription document only (Kiali CR is applied later)
   if oc get subscription kiali-ossm -n openshift-operators &>/dev/null; then
     ok "Kiali Operator subscription already exists — skipping."
   else
     info "Creating Kiali Operator subscription..."
-    oc apply -f <(awk 'p && /^---/{exit} /kind: Subscription/{p=1} p' \
-      "${MANIFESTS_DIR}/00-kiali-operator.yaml")
+    awk 'p && /^---/{exit} /kind: Subscription/{p=1} p' \
+      "${MANIFESTS_DIR}/00-kiali-operator.yaml" \
+      | oc apply -f -
     ok "Kiali Operator subscription created."
   fi
   wait_for_csv "openshift-operators" "kiali-ossm" "$OLM_TIMEOUT"
@@ -162,13 +206,14 @@ install_control_plane() {
   oc get ns "$ISTIO_NS" &>/dev/null || oc create ns "$ISTIO_NS"
   oc get ns "$CNI_NS"   &>/dev/null || oc create ns "$CNI_NS"
 
+  # 01 and 02 deploy to istio-system / istio-cni, no NAMESPACE substitution needed
   info "Deploying IstioCNI (ztunnel DaemonSet)..."
   oc apply -f "${MANIFESTS_DIR}/02-istiocni.yaml"
 
   info "Deploying Istio CR (ambient profile)..."
   oc apply -f "${MANIFESTS_DIR}/01-istio.yaml"
 
-  info "Waiting for Istio CR to become Ready (this takes 2–3 minutes)..."
+  info "Waiting for Istio CR to become Ready (2–3 minutes)..."
   oc wait istio/default -n "$ISTIO_NS" \
     --for=condition=Ready --timeout=180s \
     || error "Istio CR not Ready. Debug: oc describe istio/default -n ${ISTIO_NS}"
@@ -187,16 +232,20 @@ enroll_namespace() {
   section "Namespace Enrollment"
 
   oc get ns "$NAMESPACE" &>/dev/null || oc create ns "$NAMESPACE"
-  oc label ns "$NAMESPACE" istio.io/dataplane-mode=ambient --overwrite
-  ok "Namespace '${NAMESPACE}' labeled. ztunnel will intercept pods without restarts."
+
+  # 03-namespace.yaml contains the namespace name itself — needs templating
+  apply_manifest "${MANIFESTS_DIR}/03-namespace.yaml"
+
+  ok "Namespace '${NAMESPACE}' enrolled in ambient mode."
+  info "  ztunnel will intercept pods without restarts."
 }
 
 # ── Step 6: Waypoint proxy ────────────────────────────────────────────────────
 deploy_waypoint() {
   section "Waypoint Proxy"
 
-  info "Creating waypoint Gateway for L7 policy enforcement..."
-  oc apply -f "${MANIFESTS_DIR}/04-waypoint.yaml"
+  info "Creating waypoint Gateway in '${NAMESPACE}'..."
+  apply_manifest "${MANIFESTS_DIR}/04-waypoint.yaml"
 
   oc wait gateway/waypoint -n "$NAMESPACE" \
     --for=condition=Programmed --timeout=90s \
@@ -208,35 +257,46 @@ deploy_waypoint() {
 # ── Step 7: AuthorizationPolicies ─────────────────────────────────────────────
 apply_policies() {
   section "AuthorizationPolicies"
-  oc apply -f "${MANIFESTS_DIR}/05-authz-policies.yaml"
-  ok "AuthorizationPolicies applied."
+
+  # Contains namespace refs and SPIFFE URIs — must be templated
+  apply_manifest "${MANIFESTS_DIR}/05-authz-policies.yaml"
+
+  ok "AuthorizationPolicies applied to '${NAMESPACE}'."
   warn "  Default-deny is now active. Verify OpenEMR can reach MariaDB and Redis."
 }
 
 # ── Step 8: NetworkPolicies ───────────────────────────────────────────────────
 apply_netpol() {
   section "NetworkPolicies"
-  oc apply -f "${MANIFESTS_DIR}/06-network-policies.yaml"
-  ok "NetworkPolicies applied."
+
+  apply_manifest "${MANIFESTS_DIR}/06-network-policies.yaml"
+
+  ok "NetworkPolicies applied to '${NAMESPACE}'."
 }
 
 # ── Step 9: EgressFirewall ────────────────────────────────────────────────────
 apply_egress() {
   section "EgressFirewall"
+
   if [[ "${SKIP_EGRESS:-false}" == "true" ]]; then
     warn "Skipping — requires OVNKubernetes CNI."
     return
   fi
-  oc apply -f "${MANIFESTS_DIR}/07-egress-firewall.yaml"
-  ok "EgressFirewall applied."
+
+  apply_manifest "${MANIFESTS_DIR}/07-egress-firewall.yaml"
+
+  ok "EgressFirewall applied to '${NAMESPACE}'."
 }
 
 # ── Step 10: Kiali ────────────────────────────────────────────────────────────
 deploy_kiali() {
   section "Kiali"
 
-  info "Creating Kiali instance in ${ISTIO_NS}..."
-  oc apply -f <(awk '/kind: Kiali/{p=1} p' "${MANIFESTS_DIR}/00-kiali-operator.yaml")
+  info "Creating Kiali instance (watching namespace '${NAMESPACE}')..."
+  # Extract the Kiali CR (second document) and template the accessible_namespaces entry
+  awk '/kind: Kiali/{p=1} p' "${MANIFESTS_DIR}/00-kiali-operator.yaml" \
+    | sed -e "s|      - openemr$|      - ${NAMESPACE}|g" \
+    | oc apply -f -
 
   info "Waiting for Kiali deployment..."
   oc rollout status deployment/kiali -n "$ISTIO_NS" --timeout=120s \
@@ -253,6 +313,7 @@ show_status() {
   echo ""
   echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════${NC}"
   echo -e "${BOLD}${CYAN}  OpenEMR Ambient Mesh Status${NC}"
+  echo -e "${BOLD}${CYAN}  Namespace: ${NAMESPACE}${NC}"
   echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════${NC}"
 
   echo ""
@@ -272,12 +333,14 @@ show_status() {
     | awk '{printf "  desired=%-4s ready=%-4s\n", $2, $4}' || echo "  Not found"
 
   echo ""
-  echo "▶ Namespace label:"
-  oc get ns "$NAMESPACE" -o jsonpath='{.metadata.labels.istio\.io/dataplane-mode}' \
-    2>/dev/null | xargs -I{} echo "  {}" || echo "  NOT SET"
+  echo "▶ Namespace ambient label:"
+  local label
+  label=$(oc get ns "$NAMESPACE" \
+    -o jsonpath='{.metadata.labels.istio\.io/dataplane-mode}' 2>/dev/null || echo "")
+  echo "  ${label:-NOT SET}"
 
   echo ""
-  echo "▶ Waypoint:"
+  echo "▶ Waypoint proxy:"
   oc get gateway/waypoint -n "$NAMESPACE" --no-headers 2>/dev/null \
     | awk '{printf "  %-30s %s\n", $1, $3}' || echo "  Not deployed"
 
@@ -314,12 +377,14 @@ show_status() {
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 cleanup() {
   warn "Removing mesh config from '${NAMESPACE}'..."
-  oc delete -f "${MANIFESTS_DIR}/07-egress-firewall.yaml"  --ignore-not-found
-  oc delete -f "${MANIFESTS_DIR}/06-network-policies.yaml" --ignore-not-found
-  oc delete -f "${MANIFESTS_DIR}/05-authz-policies.yaml"   --ignore-not-found
-  oc delete -f "${MANIFESTS_DIR}/04-waypoint.yaml"          --ignore-not-found
+
+  render "${MANIFESTS_DIR}/07-egress-firewall.yaml"  | oc delete -f - --ignore-not-found
+  render "${MANIFESTS_DIR}/06-network-policies.yaml" | oc delete -f - --ignore-not-found
+  render "${MANIFESTS_DIR}/05-authz-policies.yaml"   | oc delete -f - --ignore-not-found
+  render "${MANIFESTS_DIR}/04-waypoint.yaml"          | oc delete -f - --ignore-not-found
   oc label ns "$NAMESPACE" istio.io/dataplane-mode- 2>/dev/null || true
-  ok "Mesh config removed. Control plane left intact."
+
+  ok "Mesh config removed from '${NAMESPACE}'. Control plane left intact."
   echo ""
   echo "To remove the control plane:"
   echo "  oc delete kiali/kiali -n ${ISTIO_NS}"
@@ -347,12 +412,13 @@ usage() {
   echo "  --cleanup        Remove mesh config from namespace (control plane left intact)"
   echo ""
   echo -e "${BOLD}Environment:${NC}"
-  echo "  OPENEMR_NAMESPACE    Target namespace (default: openemr)"
+  echo "  OPENEMR_NAMESPACE    Namespace where OpenEMR is deployed (default: openemr)"
   echo ""
-  echo -e "${BOLD}Typical workflow:${NC}"
-  echo "  $0 --full                              # everything in one shot"
-  echo "  $0 --operators                         # install operators, deploy OpenEMR, then:"
-  echo "  $0 --control-plane && $0 --policies    # bring up mesh + policies"
+  echo -e "${BOLD}Examples:${NC}"
+  echo "  $0 --full                                    # deploy to 'openemr' namespace"
+  echo "  OPENEMR_NAMESPACE=my-emr $0 --full           # deploy to 'my-emr' namespace"
+  echo "  $0 --operators                               # install operators only"
+  echo "  $0 --control-plane && $0 --policies          # staged deployment"
   echo ""
 }
 
@@ -370,7 +436,7 @@ case "${1:-}" in
     apply_egress
     deploy_kiali
     show_status
-    echo -e "${GREEN}${BOLD}Full ambient mesh deployment complete!${NC}"
+    echo -e "${GREEN}${BOLD}Full ambient mesh deployment complete! Namespace: ${NAMESPACE}${NC}"
     ;;
   --operators)
     preflight
@@ -385,14 +451,16 @@ case "${1:-}" in
     ok "Control plane ready. Run --policies next."
     ;;
   --policies)
+    preflight
     enroll_namespace
     deploy_waypoint
     apply_policies
     apply_netpol
     apply_egress
-    ok "All policies applied."
+    ok "All policies applied to '${NAMESPACE}'."
     ;;
   --netpol-only)
+    preflight
     apply_netpol
     ;;
   --egress-only)
@@ -403,6 +471,7 @@ case "${1:-}" in
     show_status
     ;;
   --cleanup)
+    preflight
     cleanup
     ;;
   *)

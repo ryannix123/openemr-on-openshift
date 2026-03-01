@@ -27,7 +27,7 @@ OSSM 3 drops the traditional sidecar model in favor of **ambient mesh**:
 For a healthcare workload like OpenEMR, ambient mode means:
 - MariaDB and Redis traffic is **automatically mTLS-encrypted** without any pod changes
 - No risk of pods running without sidecars (a common misconfiguration in sidecar mode)
-- Faster rollout — mesh enrollment is a namespace label, no rollout required
+- Faster rollout — mesh enrollment is a namespace label, no pod restart required
 
 ## Architecture
 
@@ -38,7 +38,7 @@ For a healthcare workload like OpenEMR, ambient mode means:
                     └──────────────┬───────────────────┘
                                    │ HBONE tunnel (ztunnel)
           ╔════════════════════════╪══════════════════════════════╗
-          ║  openemr namespace     │   Ambient Mesh enforced      ║
+          ║  <namespace>           │   Ambient Mesh enforced      ║
           ║                        ▼                              ║
           ║         ┌──────────────────────────┐                  ║
           ║         │      Waypoint Proxy       │ ← L7 AuthzPolicy║
@@ -46,7 +46,7 @@ For a healthcare workload like OpenEMR, ambient mode means:
           ║         └──────┬─────────────┬──────┘                  ║
           ║                │             │                         ║
           ║    ztunnel 🔒  │  mTLS/HBONE │  🔒 ztunnel            ║
-          ║    (auto-encrypt all traffic)│                         ║
+          ║    (auto-encrypts all traffic)                         ║
           ║                │             │                         ║
           ║    ┌───────────▼──┐  ┌───────▼──────────┐             ║
           ║    │   OpenEMR    │  │   MariaDB/Redis   │             ║
@@ -83,68 +83,76 @@ For a healthcare workload like OpenEMR, ambient mode means:
 - **OVN-Kubernetes CNI** (default on OpenShift 4.12+)
 - **OpenEMR deployed** via [openemr-on-openshift](https://github.com/ryannix123/openemr-on-openshift)
 
-### Required Operators / CRDs
-
-**1. Sail Operator** (replaces the old `servicemeshoperator` in OSSM 3):
-```bash
-# Install from OperatorHub — search "Red Hat OpenShift Service Mesh" or "Sail"
-# Alternatively via CLI:
-oc apply -f https://raw.githubusercontent.com/istio-ecosystem/sail-operator/main/bundle/manifests/sail-operator.clusterserviceversionversion.yaml
-```
-
-**2. Gateway API CRDs** (required for waypoint proxy):
-```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
-```
-
-**3. Verify:**
-```bash
-oc get crd istioes.sailoperator.io istiocnis.sailoperator.io gateways.gateway.networking.k8s.io
-```
+The deploy script handles all operator and CRD installation automatically. No manual OperatorHub steps are required.
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/ryannix123/openemr-on-openshift.git
 cd openemr-on-openshift/service-mesh
-
 chmod +x deploy-mesh.sh
 
-# Full deployment: control plane + waypoint + policies + egress
+# Full install — operators, control plane, policies, and Kiali in one shot
 ./deploy-mesh.sh --full
 
-# Check status
+# If OpenEMR is deployed in a namespace other than 'openemr':
+OPENEMR_NAMESPACE=my-emr ./deploy-mesh.sh --full
+
+# Check status at any time
 ./deploy-mesh.sh --status
 ```
 
-### Individual Steps
+### Staged Deployment
+
+Useful when OpenEMR is being deployed to a fresh cluster alongside the mesh, or when you want to verify each phase before proceeding:
 
 ```bash
-./deploy-mesh.sh --policies      # Policies only (control plane already running)
-./deploy-mesh.sh --netpol-only   # NetworkPolicies only (no operators needed)
+# 1. Install Sail Operator, Kiali Operator, and Gateway API CRDs
+./deploy-mesh.sh --operators
+
+# 2. Deploy OpenEMR (if not already running)
+#    cd .. && ./deploy-openemr.sh
+
+# 3. Deploy Istio control plane and enroll the namespace
+./deploy-mesh.sh --control-plane
+
+# 4. Apply waypoint, AuthorizationPolicies, NetworkPolicies, and EgressFirewall
+./deploy-mesh.sh --policies
+```
+
+### Other Options
+
+```bash
+./deploy-mesh.sh --netpol-only   # NetworkPolicies only (no mesh operators required)
 ./deploy-mesh.sh --egress-only   # EgressFirewall only
-./deploy-mesh.sh --cleanup       # Remove mesh config (keep control plane)
+./deploy-mesh.sh --cleanup       # Remove mesh config from namespace (keep control plane)
 ```
 
 ## What Gets Deployed
 
 | File | Purpose |
 |------|---------|
-| `01-istio.yaml` | `Istio` CR — Sail Operator deploys Istiod with ambient profile |
-| `02-istiocni.yaml` | `IstioCNI` CR — deploys ztunnel DaemonSet to all nodes |
-| `03-namespace.yaml` | Labels `openemr` namespace with `istio.io/dataplane-mode: ambient` |
-| `04-waypoint.yaml` | Gateway API `Gateway` CR — deploys waypoint proxy for L7 policies |
-| `05-authz-policies.yaml` | AuthorizationPolicies — default deny + allow rules via waypoint |
-| `06-network-policies.yaml` | NetworkPolicies — L3/L4 isolation (works without mesh) |
-| `07-egress-firewall.yaml` | EgressFirewall — restrict outbound to allow-list |
+| `00-sail-operator.yaml` | OLM Subscription — installs the Sail Operator (OSSM 3) from `redhat-operators` |
+| `00-kiali-operator.yaml` | OLM Subscription + Kiali CR — installs Kiali Operator and creates a Kiali instance |
+| `01-istio.yaml` | `Istio` CR — Sail Operator deploys Istiod with the ambient profile |
+| `02-istiocni.yaml` | `IstioCNI` CR — deploys the ztunnel DaemonSet to all nodes |
+| `03-namespace.yaml` | Target namespace labeled `istio.io/dataplane-mode: ambient` |
+| `04-waypoint.yaml` | Gateway API `Gateway` CR — deploys waypoint proxy for L7 policy enforcement |
+| `05-authz-policies.yaml` | AuthorizationPolicies — default deny + identity-based allow rules via waypoint |
+| `06-network-policies.yaml` | NetworkPolicies — L3/L4 CNI-level isolation (independent of the mesh) |
+| `07-egress-firewall.yaml` | EgressFirewall — restricts outbound connections to an explicit allow-list |
+
+The Gateway API CRDs (`gateways.gateway.networking.k8s.io`, `httproutes.gateway.networking.k8s.io`) are fetched from the upstream GitHub release at deploy time and are not stored as manifest files.
+
+### Namespace Templating
+
+All manifests use `openemr` as a placeholder namespace. The deploy script rewrites namespace references at apply time using the `OPENEMR_NAMESPACE` environment variable — no manifest files are modified on disk. This includes `namespace:` metadata fields, SPIFFE identity URIs (`cluster.local/ns/<namespace>/sa/default`), and the Kiali `accessible_namespaces` list.
 
 ## Key Differences from OSSM 2.x
 
-If you're migrating from the OSSM 2.x configuration in this repo:
-
 | OSSM 2.x | OSSM 3 Ambient | Notes |
 |---|---|---|
-| `ServiceMeshControlPlane` | `Istio` CR | Different CRD, different operator |
+| `ServiceMeshControlPlane` | `Istio` CR | Different CRD, different operator (Sail) |
 | `ServiceMeshMemberRoll` | Namespace label | `istio.io/dataplane-mode: ambient` |
 | `sidecar.istio.io/inject: "true"` annotation | Not needed | ztunnel handles enrollment |
 | `PeerAuthentication` (strict mTLS) | Not needed | ztunnel always encrypts |
@@ -154,104 +162,103 @@ If you're migrating from the OSSM 2.x configuration in this repo:
 
 ## Verifying the Mesh
 
+Set `NS` to your target namespace before running these commands:
+
+```bash
+NS="${OPENEMR_NAMESPACE:-openemr}"
+```
+
 ### Check ztunnel is intercepting traffic
 
 ```bash
 # Pods should show the ambient redirection annotation
-oc get pod -n openemr -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.ambient\.istio\.io/redirection}{"\n"}{end}'
+oc get pod -n "$NS" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.ambient\.istio\.io/redirection}{"\n"}{end}'
 # Expected: enabled
 
-# View ztunnel's view of workloads
+# View ztunnel's view of enrolled workloads
 oc exec -n istio-system ds/ztunnel -- pilot-agent request GET /config_dump | jq '.workloads'
 ```
 
 ### Verify mTLS is active (L4)
 
 ```bash
-# ztunnel logs show HBONE connections
-oc logs -n istio-system ds/ztunnel -c ztunnel | grep "openemr" | head -20
+# ztunnel logs show HBONE connections for your namespace
+oc logs -n istio-system ds/ztunnel -c ztunnel | grep "$NS" | head -20
 ```
 
-### Verify waypoint is enforcing L7 policies
+### Verify the waypoint is enforcing L7 policies
 
 ```bash
 # Check waypoint pod is running
-oc get pod -n openemr -l gateway.istio.io/managed=istio.io-mesh-controller
+oc get pod -n "$NS" -l gateway.istio.io/managed=istio.io-mesh-controller
 
 # Watch waypoint access logs during a test request
-oc logs -n openemr -l gateway.istio.io/managed=istio.io-mesh-controller -f
+oc logs -n "$NS" -l gateway.istio.io/managed=istio.io-mesh-controller -f
 ```
 
-### Test AuthorizationPolicy is blocking unauthorized access
+### Test that AuthorizationPolicies are blocking unauthorized access
 
 ```bash
-# This should be DENIED (random pod trying to reach MariaDB)
-oc run test-denial --image=nicolaka/netshoot -it --rm --restart=Never -n openemr -- \
+# This should be DENIED — a random pod attempting to reach MariaDB directly
+oc run test-denial --image=nicolaka/netshoot -it --rm --restart=Never -n "$NS" -- \
   nc -zv mariadb 3306
-# Expected: connection refused or timeout (RBAC deny)
+# Expected: connection refused or timeout (RBAC deny in waypoint logs)
 ```
 
 ## Observability
 
-OSSM 3 separates observability from the control plane. Deploy Kiali separately:
+Kiali is deployed automatically by `./deploy-mesh.sh --full`. After deployment:
 
 ```bash
-# Install Kiali Operator from OperatorHub, then:
-cat <<EOF | oc apply -f -
-apiVersion: kiali.io/v1alpha1
-kind: Kiali
-metadata:
-  name: kiali
-  namespace: istio-system
-spec:
-  auth:
-    strategy: openshift
-  deployment:
-    accessible_namespaces: ["openemr"]
-EOF
-
-# Get Kiali URL
-oc get route kiali -n istio-system -o jsonpath='{.spec.host}'; echo
+# Get the Kiali URL
+oc get route kiali -n istio-system -o jsonpath='https://{.spec.host}'; echo
 ```
 
-For distributed tracing, deploy **Tempo** (Jaeger is deprecated in OSSM 3):
+Kiali provides a live traffic topology graph showing encrypted connections between OpenEMR, MariaDB, and Redis with mTLS lock icons. This is the fastest way to confirm policies are working correctly.
 
-```bash
-# Install Tempo Operator from OperatorHub
-# Kiali connects to Tempo automatically when configured
-```
+For distributed tracing, deploy **Tempo** (Jaeger is deprecated in OSSM 3) from OperatorHub and configure the `external_services.tracing` section of the Kiali CR in `manifests/00-kiali-operator.yaml`.
 
 ## Troubleshooting
 
 ### Pods show 1/1 — is the mesh working?
 
-Yes! In ambient mode, **1/1 is correct**. There is no sidecar. Verify ambient enrollment:
+Yes. In ambient mode **1/1 is correct** — there is no sidecar container. Verify enrollment:
 
 ```bash
-oc get pod -n openemr -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.ambient\.istio\.io/redirection}{"\n"}{end}'
+NS="${OPENEMR_NAMESPACE:-openemr}"
+oc get pod -n "$NS" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.ambient\.istio\.io/redirection}{"\n"}{end}'
+# Should show: enabled
 ```
 
 ### OpenEMR can't reach MariaDB after applying policies
 
-The waypoint targetRef or service account principal may not match. Debug:
+The waypoint `targetRef` or SPIFFE principal may not match the actual service account. Debug:
 
 ```bash
-# Check the actual service account OpenEMR is using
-oc get pod -l app=openemr -n openemr -o jsonpath='{.items[0].spec.serviceAccountName}'; echo
+NS="${OPENEMR_NAMESPACE:-openemr}"
+
+# Check the service account OpenEMR is actually using
+oc get pod -l app=openemr -n "$NS" \
+  -o jsonpath='{.items[0].spec.serviceAccountName}'; echo
 
 # Check waypoint logs for RBAC denials
-oc logs -n openemr -l gateway.istio.io/managed=istio.io-mesh-controller | grep -i "rbac\|deny"
+oc logs -n "$NS" -l gateway.istio.io/managed=istio.io-mesh-controller \
+  | grep -i "rbac\|deny"
 
-# Temporarily disable deny-all to confirm connectivity works without policies
-oc delete authorizationpolicy deny-all -n openemr
-# (re-apply after confirming)
+# Temporarily remove deny-all to confirm connectivity is otherwise healthy
+oc delete authorizationpolicy deny-all -n "$NS"
+# Re-apply once confirmed:
+# OPENEMR_NAMESPACE=$NS ./deploy-mesh.sh --policies
 ```
 
 ### Waypoint not becoming Programmed
 
 ```bash
-oc describe gateway/waypoint -n openemr
-# Ensure GatewayClass 'istio-waypoint' exists
+NS="${OPENEMR_NAMESPACE:-openemr}"
+oc describe gateway/waypoint -n "$NS"
+# Ensure the GatewayClass exists
 oc get gatewayclass istio-waypoint
 ```
 
@@ -259,8 +266,17 @@ oc get gatewayclass istio-waypoint
 
 ```bash
 oc describe daemonset/ztunnel -n istio-system
-# Common cause: SCC permissions — ztunnel needs privileged SCC
+# Common cause on OpenShift: missing SCC
 oc adm policy add-scc-to-user privileged -z ztunnel -n istio-system
+```
+
+### Sail Operator CSV stuck in Installing
+
+```bash
+oc get csv -n openshift-operators | grep servicemeshoperator3
+oc describe csv <csv-name> -n openshift-operators | grep -A5 "Conditions:"
+# On disconnected clusters, ensure redhat-operators CatalogSource is mirrored
+oc get catalogsource -n openshift-marketplace
 ```
 
 ## HIPAA Alignment
@@ -270,19 +286,25 @@ oc adm policy add-scc-to-user privileged -z ztunnel -n istio-system
 | §164.312(e)(1) — Transmission Security | ztunnel auto-encrypts all pod-to-pod traffic with mTLS |
 | §164.312(a)(1) — Access Control | AuthorizationPolicies (via waypoint) enforce identity-based access |
 | §164.312(b) — Audit Controls | Kiali + Tempo provide full traffic audit trail |
-| §164.312(e)(2)(ii) — Encryption | Automatic cert rotation via mesh CA (no config needed) |
-| §164.308(a)(4) — Information Access Management | Egress firewall prevents unauthorized data flows |
+| §164.312(e)(2)(ii) — Encryption | Automatic certificate rotation via mesh CA |
+| §164.308(a)(4) — Information Access Management | Egress firewall prevents unauthorized data exfiltration |
 
 ## Cleanup
 
 ```bash
-# Remove mesh config from namespace only
+# Remove mesh config from the namespace only (control plane left intact)
 ./deploy-mesh.sh --cleanup
+# or with a custom namespace:
+OPENEMR_NAMESPACE=my-emr ./deploy-mesh.sh --cleanup
 
-# Full removal
+# Full control plane removal
+oc delete kiali/kiali -n istio-system
 oc delete istio/default -n istio-system
 oc delete istiocni/default -n istio-cni
 oc delete namespace istio-system istio-cni
+
+# Remove operators (only if no other mesh workloads depend on them)
+oc delete subscription servicemeshoperator3 kiali-ossm -n openshift-operators
 ```
 
 ## Author
