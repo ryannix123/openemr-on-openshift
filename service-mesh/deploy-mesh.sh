@@ -6,7 +6,7 @@
 #   1. Install the Sail Operator (OSSM 3) via OLM
 #   2. Install the Kiali Operator via OLM
 #   3. Install Gateway API CRDs (required for waypoint proxy)
-#   4. Deploy the Istio control plane and IstioCNI (ztunnel)
+#   4. Deploy the Istio control plane, IstioCNI (CNI plugin), and ZTunnel (ztunnel DaemonSet)
 #   5. Enroll the target namespace in ambient mode
 #   6. Deploy the waypoint proxy for L7 policy enforcement
 #   7. Apply zero-trust AuthorizationPolicies
@@ -27,9 +27,10 @@ CNI_NS="istio-cni"
 MANIFESTS_DIR="$(cd "$(dirname "$0")/manifests" && pwd)"
 
 GATEWAY_API_VERSION="v1.1.0"
+GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-RedHat1234!}"
 GATEWAY_API_URL="https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
 
-OLM_TIMEOUT=300
+OLM_TIMEOUT=600   # CSV Succeeded + CRD propagation can take several minutes on a fresh cluster
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -103,14 +104,23 @@ wait_for_csv() {
 
 wait_for_crd() {
   local crd="$1"
-  local elapsed=0 interval=5
-  info "Waiting for CRD '${crd}'..."
+  local timeout="${2:-300}"   # default 300s — OLM registers CRDs asynchronously
+  local elapsed=0 interval=5 #  after CSV Succeeded; 120s is not always enough
+  info "Waiting for CRD '${crd}' to be Established (timeout: ${timeout}s)..."
+
+  # Phase 1: wait for the CRD object to appear at all
   while ! oc get crd "$crd" &>/dev/null; do
     sleep $interval
     elapsed=$((elapsed + interval))
-    [[ $elapsed -gt 120 ]] && error "Timed out waiting for CRD '${crd}'."
+    [[ $elapsed -gt $timeout ]]       && error "Timed out waiting for CRD '${crd}' to appear after ${timeout}s."
+    info "  Still waiting for '${crd}'... (${elapsed}s)"
   done
-  ok "CRD '${crd}' available."
+
+  # Phase 2: wait for Established + NamesAccepted — a CRD can exist but not yet
+  # be usable if the API server hasn't finished registering the new schema.
+  oc wait crd/"$crd"     --for=condition=Established     --timeout="${timeout}s"     || error "CRD '${crd}' present but never reached Established condition."
+
+  ok "CRD '${crd}' Established."
 }
 
 # ── Step 1: Preflight ─────────────────────────────────────────────────────────
@@ -144,6 +154,19 @@ preflight() {
 
   oc get catalogsource redhat-operators -n openshift-marketplace &>/dev/null \
     || warn "CatalogSource 'redhat-operators' not found — operator install may fail on disconnected clusters."
+
+  # Check OVN-K routingViaHost — required for ztunnel inbound traffic interception
+  local routing_via_host
+  routing_via_host=$(oc get network.operator.openshift.io cluster \
+    -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.routingViaHost}' 2>/dev/null || echo "false")
+  if [[ "$routing_via_host" != "true" ]]; then
+    warn "OVN-K routingViaHost is not enabled. Public URL access will time out (408)."
+    warn "Apply this patch BEFORE deploying (triggers node reboot on SNO):"
+    warn "  oc patch network.operator.openshift.io cluster --type=merge \\"
+    warn "    -p='{\"spec\":{\"defaultNetwork\":{\"ovnKubernetesConfig\":{\"gatewayConfig\":{\"routingViaHost\":true}}}}}'"
+  else
+    ok "OVN-K routingViaHost=true confirmed."
+  fi
 
   info "Target namespace: ${NAMESPACE}"
 }
@@ -180,20 +203,24 @@ install_operators() {
     ok "Sail Operator subscription created."
   fi
   wait_for_csv "openshift-operators" "servicemeshoperator3" "$OLM_TIMEOUT"
-  wait_for_crd "istioes.sailoperator.io"
+  wait_for_crd "istios.sailoperator.io"
   wait_for_crd "istiocnis.sailoperator.io"
+  wait_for_crd "ztunnels.sailoperator.io"
 
   # Kiali Operator — Subscription document only (Kiali CR is applied later)
   if oc get subscription kiali-ossm -n openshift-operators &>/dev/null; then
     ok "Kiali Operator subscription already exists — skipping."
   else
     info "Creating Kiali Operator subscription..."
-    awk 'p && /^---/{exit} /kind: Subscription/{p=1} p' \
+    # Extract the first YAML document (Subscription) only.
+    # Print all lines up to (but not including) the second --- separator.
+    # Uses awk instead of sed for BSD/macOS compatibility.
+    awk 'BEGIN{n=0} /^---$/{n++; if(n==2) exit} {print}' \
       "${MANIFESTS_DIR}/00-kiali-operator.yaml" \
       | oc apply -f -
     ok "Kiali Operator subscription created."
   fi
-  wait_for_csv "openshift-operators" "kiali-ossm" "$OLM_TIMEOUT"
+  wait_for_csv "openshift-operators" "kiali-operator" "$OLM_TIMEOUT"
   wait_for_crd "kialis.kiali.io"
 
   ok "All operators ready."
@@ -206,9 +233,12 @@ install_control_plane() {
   oc get ns "$ISTIO_NS" &>/dev/null || oc create ns "$ISTIO_NS"
   oc get ns "$CNI_NS"   &>/dev/null || oc create ns "$CNI_NS"
 
-  # 01 and 02 deploy to istio-system / istio-cni, no NAMESPACE substitution needed
-  info "Deploying IstioCNI (ztunnel DaemonSet)..."
-  oc apply -f "${MANIFESTS_DIR}/02-istiocni.yaml"
+  # 01 and 02 deploy to istio-system / istio-cni — no NAMESPACE substitution needed.
+  # 02-ztunnel.yaml contains both the IstioCNI CR (CNI plugin) and the ZTunnel CR
+  # (ztunnel DaemonSet). In Sail Operator 3.2+, ZTunnel is a first-class resource
+  # using sailoperator.io/v1 — sailoperator.io/v1alpha1 ZTunnel is deprecated.
+  info "Deploying IstioCNI and ZTunnel CRs..."
+  oc apply -f "${MANIFESTS_DIR}/02-ztunnel.yaml"
 
   info "Deploying Istio CR (ambient profile)..."
   oc apply -f "${MANIFESTS_DIR}/01-istio.yaml"
@@ -218,11 +248,63 @@ install_control_plane() {
     --for=condition=Ready --timeout=180s \
     || error "Istio CR not Ready. Debug: oc describe istio/default -n ${ISTIO_NS}"
 
-  info "Waiting for ztunnel rollout..."
+  info "Waiting for ZTunnel CR to become Ready..."
+  oc wait ztunnel/default -n "$ISTIO_NS" \
+    --for=condition=Ready --timeout=120s \
+    || error "ZTunnel CR not Ready. Debug: oc describe ztunnel/default -n ${ISTIO_NS}"
+
+  info "Waiting for ztunnel DaemonSet rollout..."
   oc rollout status daemonset/ztunnel -n "$ISTIO_NS" --timeout=120s
 
   info "Waiting for Istiod rollout..."
   oc rollout status deployment/istiod -n "$ISTIO_NS" --timeout=120s
+
+  # ── Post-deploy required configuration ────────────────────────────────────
+  # These steps are not handled by the Sail Operator and must be applied
+  # manually after the control plane is ready.
+
+  # 1. istio-discovery=enabled labels — required by istio-cni agent to
+  #    recognize namespaces and enroll pods into the mesh.
+  info "Labeling control plane namespaces for istio-discovery..."
+  oc label namespace "$ISTIO_NS" istio-discovery=enabled --overwrite
+  oc label namespace "$CNI_NS"   istio-discovery=enabled --overwrite
+  ok "istio-discovery labels applied."
+
+  # 2. ztunnel impersonation RBAC — required for ztunnel to obtain SPIFFE
+  #    certificates from istiod on behalf of enrolled workloads.
+  #    Without this, all mesh traffic fails with cert issuance errors.
+  info "Creating ztunnel impersonation ClusterRole and ClusterRoleBinding..."
+  oc apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ztunnel-impersonate
+rules:
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["impersonate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ztunnel-impersonate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ztunnel-impersonate
+subjects:
+- kind: ServiceAccount
+  name: ztunnel
+  namespace: ${ISTIO_NS}
+EOF
+  ok "ztunnel impersonation RBAC applied."
+
+  # 3. Restart istiod and ztunnel to pick up the new configuration
+  info "Restarting istiod and ztunnel to apply configuration..."
+  oc rollout restart deployment/istiod -n "$ISTIO_NS"
+  oc rollout restart daemonset/ztunnel -n "$ISTIO_NS"
+  oc rollout status deployment/istiod   -n "$ISTIO_NS" --timeout=120s
+  oc rollout status daemonset/ztunnel   -n "$ISTIO_NS" --timeout=120s
 
   ok "Control plane ready."
 }
@@ -236,7 +318,14 @@ enroll_namespace() {
   # 03-namespace.yaml contains the namespace name itself — needs templating
   apply_manifest "${MANIFESTS_DIR}/03-namespace.yaml"
 
-  ok "Namespace '${NAMESPACE}' enrolled in ambient mode."
+  # Add use-waypoint label and annotation so ztunnel routes traffic through
+  # the waypoint proxy. Required for L7 AuthorizationPolicy enforcement and
+  # for the waypoint SA to appear as source identity at destination pods.
+  oc label namespace "$NAMESPACE"     istio.io/use-waypoint=waypoint     --overwrite 2>/dev/null ||     warn "Could not set istio.io/use-waypoint label — requires ambient-namespace-enroller ClusterRole"
+
+  oc annotate namespace "$NAMESPACE"     istio.io/use-waypoint=waypoint     --overwrite 2>/dev/null || true
+
+  ok "Namespace '${NAMESPACE}' enrolled in ambient mode with waypoint."
   info "  ztunnel will intercept pods without restarts."
 }
 
@@ -269,9 +358,18 @@ apply_policies() {
 apply_netpol() {
   section "NetworkPolicies"
 
+  # In ambient mode, ztunnel intercepts all pod traffic at the node level via HBONE.
+  # From the pod network / NetworkPolicy perspective, all inbound connections appear
+  # to come from ztunnel — not from the original source namespace or pod. Granular
+  # per-service NetworkPolicies (deny-all + allow-router + allow-pod-to-pod) therefore
+  # always block traffic regardless of how they are written.
+  #
+  # AuthorizationPolicies enforced by ztunnel and the waypoint proxy provide equivalent
+  # or stronger isolation (SPIFFE identity-based, not IP-based). The NetworkPolicy is
+  # set to allow-all so it does not conflict with mesh enforcement.
   apply_manifest "${MANIFESTS_DIR}/06-network-policies.yaml"
 
-  ok "NetworkPolicies applied to '${NAMESPACE}'."
+  ok "NetworkPolicy applied to '${NAMESPACE}' — allow-all ingress, enforcement delegated to ztunnel AuthzPolicies."
 }
 
 # ── Step 9: EgressFirewall ────────────────────────────────────────────────────
@@ -293,8 +391,9 @@ deploy_kiali() {
   section "Kiali"
 
   info "Creating Kiali instance (watching namespace '${NAMESPACE}')..."
-  # Extract the Kiali CR (second document) and template the accessible_namespaces entry
-  awk '/kind: Kiali/{p=1} p' "${MANIFESTS_DIR}/00-kiali-operator.yaml" \
+  # Extract the Kiali CR (second YAML document) and template the namespace.
+  # Print lines only after the second --- separator so apiVersion is included.
+  awk 'f; /^---$/{if(++n==2) f=1}' "${MANIFESTS_DIR}/00-kiali-operator.yaml" \
     | sed -e "s|      - openemr$|      - ${NAMESPACE}|g" \
     | oc apply -f -
 
@@ -306,6 +405,168 @@ deploy_kiali() {
   kiali_url=$(oc get route kiali -n "$ISTIO_NS" \
     -o jsonpath='{.spec.host}' 2>/dev/null || echo "route pending")
   ok "Kiali: https://${kiali_url}"
+}
+
+# ── Step 11: Grafana ──────────────────────────────────────────────────────────
+deploy_grafana() {
+  section "Grafana"
+
+  # Install Grafana Operator via community-operators
+  if oc get subscription grafana-operator -n openshift-operators &>/dev/null; then
+    ok "Grafana Operator subscription already exists — skipping."
+  else
+    info "Creating Grafana Operator subscription..."
+    oc apply -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: grafana-operator
+  namespace: openshift-operators
+spec:
+  channel: v5
+  name: grafana-operator
+  source: community-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+EOF
+    ok "Grafana Operator subscription created."
+  fi
+  wait_for_csv "openshift-operators" "grafana-operator" "$OLM_TIMEOUT"
+  wait_for_crd "grafanas.grafana.integreatly.org"
+
+  # Create Grafana instance in istio-system
+  info "Creating Grafana instance in '${ISTIO_NS}'..."
+  oc apply -f - <<EOF
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: grafana
+  namespace: ${ISTIO_NS}
+  labels:
+    dashboards: grafana
+spec:
+  deployment:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: grafana
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+  config:
+    auth:
+      disable_login_form: "false"
+    security:
+      admin_user: admin
+      admin_password: "${GRAFANA_ADMIN_PASSWORD}"
+EOF
+
+  # Wait for Grafana pod
+  info "Waiting for Grafana deployment to be ready..."
+  local elapsed=0 interval=10
+  while [[ $elapsed -lt 120 ]]; do
+    local ready
+    ready=$(oc get deployment -n "$ISTIO_NS" -l "app.kubernetes.io/name=grafana" \
+      -o jsonpath='{.items[0].status.readyReplicas}' 2>/dev/null || echo "0")
+    [[ "$ready" == "1" ]] && break
+    sleep $interval
+    elapsed=$((elapsed + interval))
+    info "  Waiting for Grafana pod... (${elapsed}s)"
+  done
+
+  # Create route if not present
+  if ! oc get route grafana -n "$ISTIO_NS" &>/dev/null; then
+    info "Creating Grafana route..."
+    oc create route edge grafana \
+      --service=grafana-service \
+      --port=3000 \
+      --namespace="$ISTIO_NS" \
+      --insecure-policy=Redirect
+  fi
+
+  local grafana_url
+  grafana_url="https://$(oc get route grafana -n "$ISTIO_NS" -o jsonpath='{.spec.host}')"
+  ok "Grafana route: ${grafana_url}"
+
+  # Add Prometheus datasource
+  info "Configuring Prometheus datasource in Grafana..."
+  local token
+  token=$(oc create token kiali-service-account -n "$ISTIO_NS")
+  local http_code
+  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+    -u "admin:${GRAFANA_ADMIN_PASSWORD}" \
+    -X POST "${grafana_url}/api/datasources" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"name\": \"Prometheus\",
+      \"type\": \"prometheus\",
+      \"url\": \"https://thanos-querier.openshift-monitoring.svc.cluster.local:9091\",
+      \"access\": \"proxy\",
+      \"isDefault\": true,
+      \"jsonData\": {
+        \"tlsSkipVerify\": true,
+        \"httpHeaderName1\": \"Authorization\"
+      },
+      \"secureJsonData\": {
+        \"httpHeaderValue1\": \"Bearer ${token}\"
+      }
+    }")
+  if [[ "$http_code" == "200" ]]; then
+    ok "Prometheus datasource configured."
+  else
+    warn "Datasource POST returned HTTP ${http_code} — you may need to add it manually."
+  fi
+
+  # Patch Kiali with Grafana URL
+  info "Patching Kiali with Grafana external_url..."
+  oc patch kiali kiali -n "$ISTIO_NS" --type=merge -p="{
+    \"spec\": {
+      \"external_services\": {
+        \"grafana\": {
+          \"enabled\": true,
+          \"external_url\": \"${grafana_url}\",
+          \"in_cluster_url\": \"http://grafana-service.${ISTIO_NS}:3000\",
+          \"auth\": {
+            \"type\": \"basic\",
+            \"username\": \"admin\",
+            \"password\": \"${GRAFANA_ADMIN_PASSWORD}\"
+          }
+        }
+      }
+    }
+  }"
+  oc rollout restart deployment/kiali -n "$ISTIO_NS"
+  ok "Kiali updated with Grafana URL."
+}
+
+# ── Step 12: Monitoring (Kiali traffic graph) ─────────────────────────────────
+deploy_monitoring() {
+  section "Monitoring (Waypoint Prometheus Metrics)"
+
+  # Enable user-workload monitoring if not already on
+  if oc get configmap cluster-monitoring-config -n openshift-monitoring &>/dev/null; then
+    ok "cluster-monitoring-config already exists — skipping."
+  else
+    info "Enabling user-workload monitoring..."
+    oc apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    enableUserWorkload: true
+EOF
+  fi
+
+  # PodMonitor + RBAC — apply from manifest (namespace templated)
+  apply_manifest "${MANIFESTS_DIR}/08-monitoring.yaml"
+
+  ok "PodMonitor and Prometheus RBAC applied."
+  info "  Kiali traffic graph will populate after ~60s once Prometheus scrapes the waypoint."
 }
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -325,6 +586,11 @@ show_status() {
   echo ""
   echo "▶ Istio control plane:"
   oc get istio/default -n "$ISTIO_NS" --no-headers 2>/dev/null \
+    | awk '{printf "  %-30s %s\n", $1, $2}' || echo "  Not found"
+
+  echo ""
+  echo "▶ ZTunnel CR:"
+  oc get ztunnel/default -n "$ISTIO_NS" --no-headers 2>/dev/null \
     | awk '{printf "  %-30s %s\n", $1, $2}' || echo "  Not found"
 
   echo ""
@@ -389,7 +655,7 @@ cleanup() {
   echo "To remove the control plane:"
   echo "  oc delete kiali/kiali -n ${ISTIO_NS}"
   echo "  oc delete istio/default -n ${ISTIO_NS}"
-  echo "  oc delete istiocni/default -n ${CNI_NS}"
+  echo "  oc delete ztunnel/default -n ${ISTIO_NS}"
   echo "  oc delete namespace ${ISTIO_NS} ${CNI_NS}"
   echo ""
   echo "To remove operators:"
@@ -404,9 +670,11 @@ usage() {
   echo -e "${BOLD}Options:${NC}"
   echo "  --full           Complete install: operators, CRDs, control plane, policies, Kiali"
   echo "  --operators      Install Sail + Kiali operators and Gateway API CRDs only"
-  echo "  --control-plane  Deploy Istio CR + IstioCNI (operators must already be installed)"
+  echo "  --control-plane  Deploy Istio CR + IstioCNI + ZTunnel (operators must already be installed)"
   echo "  --policies       Enroll namespace, waypoint, AuthZ + NetworkPolicy + EgressFirewall"
+  echo "  --grafana-only   Install Grafana operator, instance, Prometheus datasource, and patch Kiali"
   echo "  --netpol-only    NetworkPolicies only (no mesh operators required)"
+  echo "  --monitoring-only  PodMonitor + Prometheus RBAC for Kiali traffic graph"
   echo "  --egress-only    EgressFirewall only"
   echo "  --status         Show mesh status"
   echo "  --cleanup        Remove mesh config from namespace (control plane left intact)"
@@ -435,6 +703,8 @@ case "${1:-}" in
     apply_netpol
     apply_egress
     deploy_kiali
+    deploy_grafana
+    deploy_monitoring
     show_status
     echo -e "${GREEN}${BOLD}Full ambient mesh deployment complete! Namespace: ${NAMESPACE}${NC}"
     ;;
@@ -457,6 +727,7 @@ case "${1:-}" in
     apply_policies
     apply_netpol
     apply_egress
+    deploy_monitoring
     ok "All policies applied to '${NAMESPACE}'."
     ;;
   --netpol-only)
@@ -466,6 +737,14 @@ case "${1:-}" in
   --egress-only)
     preflight
     apply_egress
+    ;;
+  --monitoring-only)
+    preflight
+    deploy_monitoring
+    ;;
+  --grafana-only)
+    preflight
+    deploy_grafana
     ;;
   --status)
     show_status

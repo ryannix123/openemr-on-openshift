@@ -1,73 +1,65 @@
 #!/bin/bash
 
 ##############################################################################
-# OpenEMR on OpenShift Developer Sandbox - Deployment Script
-# 
-# This script deploys OpenEMR 8.0.0 with MariaDB on OpenShift Developer Sandbox
-# Based on the nextcloud-simple-custom deployment pattern
+# OpenEMR on OpenShift - Deployment Script
 #
-# Note: Developer Sandbox uses AWS EBS storage (RWO only), so OpenEMR runs
-# as a single replica. This is suitable for development/demo environments.
+# Deploys OpenEMR 8.0.0 with MariaDB and Redis on OpenShift.
+# Works on Developer Sandbox, Single Node OpenShift (SNO), and full clusters.
 #
-# Updated: Uses current namespace instead of creating a new project
-#          (Developer Sandbox doesn't allow project creation)
+# Storage class is auto-detected from the cluster default unless overridden:
+#   STORAGE_CLASS=lvms-vg1 ./deploy-openemr.sh
 #
-# Author: Ryan Nix
-# Version: 1.1
+# Author: Ryan Nix <ryan.nix@gmail.com>
+# Version: 1.2
 ##############################################################################
 
 set -e
 
-# Color codes for output
+# ── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Configuration - PROJECT_NAME will be set dynamically from current context
+# ── Images ───────────────────────────────────────────────────────────────────
 OPENEMR_IMAGE="quay.io/ryan_nix/openemr-openshift:latest"
 MARIADB_IMAGE="quay.io/fedora/mariadb-118:latest"
 REDIS_IMAGE="docker.io/redis:8-alpine"
 
-# Storage configuration for Developer Sandbox (AWS EBS - RWO only)
-STORAGE_CLASS="gp3-csi"  # Default Developer Sandbox storage class
+# ── Storage ──────────────────────────────────────────────────────────────────
+# Auto-detect the cluster's default StorageClass unless the caller sets
+# STORAGE_CLASS explicitly. Works on SNO (lvms-vg1), ODF, and Developer
+# Sandbox (gp3-csi) without any script changes.
+if [[ -z "${STORAGE_CLASS:-}" ]]; then
+  STORAGE_CLASS=$(oc get storageclass \
+    -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' \
+    2>/dev/null || true)
+fi
+# storageClassName is omitted from PVCs when empty — Kubernetes will then
+# use the cluster default, which is equivalent but avoids an explicit name.
 DB_STORAGE_SIZE="5Gi"
 DOCUMENTS_STORAGE_SIZE="10Gi"
 REDIS_STORAGE_SIZE="1Gi"
 
-# Database configuration
+# ── Database ─────────────────────────────────────────────────────────────────
 DB_NAME="openemr"
 DB_USER="openemr"
 DB_PASSWORD="$(openssl rand -hex 24)"
 DB_ROOT_PASSWORD="$(openssl rand -hex 24)"
 
-# OpenEMR admin configuration
+# ── OpenEMR admin ─────────────────────────────────────────────────────────────
 OE_ADMIN_USER="admin"
 OE_ADMIN_PASSWORD="$(openssl rand -hex 12)"
-
-# OpenEMR configuration
-# Note: Route will auto-generate with Developer Sandbox domain
 
 ##############################################################################
 # Helper Functions
 ##############################################################################
 
-print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
 print_header() {
     echo ""
@@ -77,7 +69,7 @@ print_header() {
 }
 
 check_command() {
-    if ! command -v $1 &> /dev/null; then
+    if ! command -v "$1" &>/dev/null; then
         print_error "$1 command not found. Please install it first."
         exit 1
     fi
@@ -86,11 +78,18 @@ check_command() {
 wait_for_pod() {
     local label=$1
     local timeout=${2:-300}
-    
     print_info "Waiting for pod with label $label to be ready..."
     oc wait --for=condition=ready pod \
         -l "$label" \
         --timeout="${timeout}s"
+}
+
+# Emit a storageClassName field only when STORAGE_CLASS is set.
+# When empty, the field is omitted so Kubernetes uses the cluster default.
+storage_class_yaml() {
+  if [[ -n "${STORAGE_CLASS:-}" ]]; then
+    echo "  storageClassName: ${STORAGE_CLASS}"
+  fi
 }
 
 ##############################################################################
@@ -99,18 +98,37 @@ wait_for_pod() {
 
 preflight_checks() {
     print_header "Preflight Checks"
-    
-    # Check if oc command exists
+
     check_command oc
-    
-    # Check if logged into OpenShift
-    if ! oc whoami &> /dev/null; then
+
+    if ! oc whoami &>/dev/null; then
         print_error "Not logged into OpenShift. Please login first."
         exit 1
     fi
-    
+
     print_success "Logged in as: $(oc whoami)"
     print_success "Using cluster: $(oc whoami --show-server)"
+
+    # Resolve and display the storage class that will be used
+    if [[ -n "${STORAGE_CLASS:-}" ]]; then
+        print_success "Storage class: ${STORAGE_CLASS} (explicit)"
+    else
+        local default_sc
+        default_sc=$(oc get storageclass \
+          -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' \
+          2>/dev/null || true)
+        if [[ -z "$default_sc" ]]; then
+            print_error "No default StorageClass found and STORAGE_CLASS is not set."
+            print_info  "Set it explicitly: STORAGE_CLASS=lvms-vg1 ./deploy-openemr.sh"
+            print_info  "Available storage classes:"
+            oc get storageclass
+            exit 1
+        fi
+        print_success "Storage class: ${default_sc} (cluster default — auto-detected)"
+        # Set it now so storage_class_yaml() emits the explicit name in PVCs,
+        # making the credentials file and summary accurate.
+        STORAGE_CLASS="$default_sc"
+    fi
 }
 
 ##############################################################################
@@ -119,26 +137,24 @@ preflight_checks() {
 
 detect_project() {
     print_header "Detecting Current Project"
-    
-    # Get the current project/namespace from context
+
     PROJECT_NAME=$(oc project -q 2>/dev/null)
-    
-    if [ -z "$PROJECT_NAME" ]; then
-        print_error "No project selected. Please switch to a project first with: oc project <project-name>"
-        print_info "Available projects:"
+
+    if [[ -z "$PROJECT_NAME" ]]; then
+        print_error "No project selected. Please switch to a project first:"
+        print_info  "  oc project <project-name>"
+        print_info  "Available projects:"
         oc projects
         exit 1
     fi
-    
+
     print_success "Using current project: $PROJECT_NAME"
-    
-    # Verify we have access to the project
-    if ! oc get project "$PROJECT_NAME" &> /dev/null; then
+
+    if ! oc get project "$PROJECT_NAME" &>/dev/null; then
         print_error "Cannot access project $PROJECT_NAME"
         exit 1
     fi
-    
-    # Export PROJECT_NAME so it's available to all functions
+
     export PROJECT_NAME
 }
 
@@ -148,8 +164,7 @@ detect_project() {
 
 deploy_mariadb() {
     print_header "Deploying MariaDB Database"
-    
-    # Create MariaDB secret
+
     print_info "Creating database secret..."
     cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -169,10 +184,8 @@ stringData:
   database-password: $DB_PASSWORD
   database-root-password: $DB_ROOT_PASSWORD
 EOF
-    
     print_success "Database secret created"
-    
-    # Create PVC for MariaDB
+
     print_info "Creating persistent volume for database..."
     cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -191,12 +204,10 @@ spec:
   resources:
     requests:
       storage: $DB_STORAGE_SIZE
-  storageClassName: $STORAGE_CLASS
+$(storage_class_yaml)
 EOF
-    
     print_success "Database PVC created"
-    
-    # Deploy MariaDB Deployment
+
     print_info "Deploying MariaDB..."
     cat <<EOF | oc apply -f -
 apiVersion: apps/v1
@@ -213,6 +224,8 @@ metadata:
     app.kubernetes.io/managed-by: kubectl
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: mariadb
@@ -262,11 +275,8 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - mysqladmin ping -h localhost
+          tcpSocket:
+            port: 3306
           initialDelaySeconds: 5
           periodSeconds: 10
         resources:
@@ -281,10 +291,8 @@ spec:
         persistentVolumeClaim:
           claimName: mariadb-data
 EOF
-    
     print_success "MariaDB deployment created"
-    
-    # Create MariaDB Service
+
     print_info "Creating MariaDB service..."
     cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -306,10 +314,8 @@ spec:
     app: mariadb
   type: ClusterIP
 EOF
-    
     print_success "MariaDB service created"
-    
-    # Wait for MariaDB to be ready
+
     wait_for_pod "app=mariadb" 300
     print_success "MariaDB is ready"
 }
@@ -320,8 +326,7 @@ EOF
 
 deploy_redis() {
     print_header "Deploying Redis Cache"
-    
-    # Deploy Redis (no persistence needed for cache, avoids permission issues)
+
     print_info "Deploying Redis..."
     cat <<EOF | oc apply -f -
 apiVersion: apps/v1
@@ -370,10 +375,8 @@ spec:
           seccompProfile:
             type: RuntimeDefault
 EOF
-    
     print_success "Redis deployment created"
-    
-    # Create Redis Service
+
     print_info "Creating Redis service..."
     cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -394,10 +397,8 @@ spec:
     app: redis
   type: ClusterIP
 EOF
-    
     print_success "Redis service created"
-    
-    # Wait for Redis to be ready
+
     wait_for_pod "app=redis" 300
     print_success "Redis is ready"
 }
@@ -408,8 +409,7 @@ EOF
 
 deploy_openemr() {
     print_header "Deploying OpenEMR Application"
-    
-    # Create PVC for OpenEMR documents (RWO for Developer Sandbox)
+
     print_info "Creating persistent volume for documents..."
     cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -428,12 +428,10 @@ spec:
   resources:
     requests:
       storage: $DOCUMENTS_STORAGE_SIZE
-  storageClassName: $STORAGE_CLASS
+$(storage_class_yaml)
 EOF
-    
     print_success "Sites PVC created"
-    
-    # Create OpenEMR admin secret
+
     print_info "Creating OpenEMR admin secret..."
     cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -451,10 +449,8 @@ stringData:
   admin-username: $OE_ADMIN_USER
   admin-password: $OE_ADMIN_PASSWORD
 EOF
-    
     print_success "OpenEMR secret created"
-    
-    # Create OpenEMR Deployment (single replica for RWO storage)
+
     print_info "Deploying OpenEMR application..."
     cat <<EOF | oc apply -f -
 apiVersion: apps/v1
@@ -493,7 +489,6 @@ spec:
         - containerPort: 8080
           name: http
         env:
-        # Database connection
         - name: MYSQL_HOST
           value: mariadb
         - name: MYSQL_DATABASE
@@ -511,7 +506,6 @@ spec:
             secretKeyRef:
               name: mariadb-secret
               key: database-password
-        # OpenEMR admin credentials
         - name: OE_USER
           value: admin
         - name: OE_PASS
@@ -519,7 +513,6 @@ spec:
             secretKeyRef:
               name: openemr-secret
               key: admin-password
-        # Legacy env vars for compatibility
         - name: DB_HOST
           value: mariadb
         - name: DB_PORT
@@ -576,10 +569,8 @@ spec:
         persistentVolumeClaim:
           claimName: openemr-sites
 EOF
-    
     print_success "OpenEMR deployment created"
-    
-    # Create OpenEMR Service
+
     print_info "Creating OpenEMR service..."
     cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -601,10 +592,8 @@ spec:
     app: openemr
   type: ClusterIP
 EOF
-    
     print_success "OpenEMR service created"
-    
-    # Create OpenEMR Route (auto-generate hostname)
+
     print_info "Creating OpenEMR route..."
     cat <<EOF | oc apply -f -
 apiVersion: route.openshift.io/v1
@@ -627,14 +616,11 @@ spec:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
 EOF
-    
     print_success "OpenEMR route created"
-    
-    # Wait for OpenEMR to be ready
+
     wait_for_pod "app=openemr" 300
     print_success "OpenEMR is ready"
-    
-    # Create crypto keys directory (PVC mount overwrites this from image)
+
     print_info "Creating crypto keys directory..."
     oc exec deployment/openemr -- mkdir -p /var/www/html/openemr/sites/default/documents/logs_and_misc/methods
     oc exec deployment/openemr -- chmod -R 770 /var/www/html/openemr/sites/default/documents/logs_and_misc
@@ -647,9 +633,9 @@ EOF
 
 display_summary() {
     print_header "Deployment Summary"
-    
+
     ROUTE_URL=$(oc get route openemr -o jsonpath='{.spec.host}')
-    
+
     echo ""
     echo -e "${GREEN}OpenEMR has been successfully deployed!${NC}"
     echo ""
@@ -667,17 +653,16 @@ display_summary() {
     echo "  Username: $DB_USER"
     echo "  Password: $DB_PASSWORD"
     echo ""
+    echo "Storage:"
+    echo "  Storage class:   ${STORAGE_CLASS} (auto-detected default)"
+    echo "  Database:        ${DB_STORAGE_SIZE} (MariaDB 11.8)"
+    echo "  Documents:       ${DOCUMENTS_STORAGE_SIZE}"
+    echo "  Redis:           in-memory (no persistence)"
+    echo ""
     echo "Next Steps:"
     echo "  1. Wait 2-3 minutes for auto-configuration to complete"
     echo "  2. Navigate to: https://$ROUTE_URL"
     echo "  3. Login with admin credentials above"
-    echo ""
-    echo "Note: This deployment runs on Developer Sandbox with:"
-    echo "  - Single replica (RWO storage limitation)"
-    echo "  - 5Gi database storage (MariaDB 11.8)"
-    echo "  - 10Gi document storage"
-    echo "  - Redis cache (in-memory, no persistence)"
-    echo "  - Auto-configuration enabled"
     echo ""
     echo "Useful Commands:"
     echo "  View pods:        oc get pods"
@@ -685,14 +670,14 @@ display_summary() {
     echo "  View database:    oc logs -f deployment/mariadb"
     echo "  Restart OpenEMR:  oc rollout restart deployment/openemr"
     echo ""
-    
-    # Save credentials to file
+
     CREDS_FILE="openemr-credentials.txt"
     cat > "$CREDS_FILE" <<EOF
 OpenEMR Deployment Credentials
 ==============================
 Date: $(date)
 Project: $PROJECT_NAME
+Cluster: $(oc whoami --show-server)
 
 Access URL: https://$ROUTE_URL
 
@@ -708,117 +693,109 @@ Database Information:
   Password: $DB_PASSWORD
   Root Password: $DB_ROOT_PASSWORD
 
-OpenShift Project: $PROJECT_NAME
+Storage:
+  Class:     $STORAGE_CLASS
+  Database:  $DB_STORAGE_SIZE
+  Documents: $DOCUMENTS_STORAGE_SIZE
 
-Notes:
-  - OpenEMR will auto-configure on first run
-  - Wait 2-3 minutes after deployment for setup to complete
-  - Login with admin credentials above
+OpenShift Project: $PROJECT_NAME
 EOF
-    
+
     print_success "Credentials saved to: $CREDS_FILE"
-    print_warning "Keep this file secure! It contains sensitive passwords."
+    print_warning "Keep this file secure — it contains sensitive passwords."
 }
 
 ##############################################################################
-# Cleanup Function (can be called with --cleanup flag)
+# Cleanup
 ##############################################################################
 
 cleanup() {
     print_header "Cleaning Up OpenEMR Deployment"
-    
-    print_info "Cleaning up OpenEMR deployment..."
-    
-    # Delete deployments
+
     print_info "Deleting deployments..."
     oc delete deployment openemr redis mariadb --ignore-not-found
-    
-    # Delete services
+
     print_info "Deleting services..."
     oc delete service openemr redis mariadb --ignore-not-found
-    
-    # Delete routes
+
     print_info "Deleting routes..."
     oc delete route openemr --ignore-not-found
-    
-    # Delete secrets
+
     print_info "Deleting secrets..."
     oc delete secret openemr-secret mariadb-secret --ignore-not-found
-    
-    # Delete ConfigMaps
+
     print_info "Deleting ConfigMaps..."
     oc delete configmap redis-config --ignore-not-found
-    
-    # Delete PVCs
+
     print_warning "Deleting PVCs (this will DELETE ALL DATA!)..."
-    print_info "Deleting PersistentVolumeClaims..."
     oc delete pvc openemr-sites mariadb-data --ignore-not-found
-    
-    print_success "Cleanup complete! All resources deleted."
+
+    print_success "Cleanup complete."
 }
 
 ##############################################################################
-# Usage Help
-##############################################################################
-
-show_help() {
-    echo "OpenEMR on OpenShift - Deployment Script"
-    echo ""
-    echo "Usage: $0 [OPTION]"
-    echo ""
-    echo "Options:"
-    echo "  --deploy    Deploy OpenEMR (default if no option specified)"
-    echo "  --cleanup   Remove all OpenEMR resources INCLUDING PVCs (DELETES ALL DATA!)"
-    echo "  --status    Show status of OpenEMR deployment"
-    echo "  --help      Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0              # Deploy OpenEMR"
-    echo "  $0 --deploy     # Deploy OpenEMR"
-    echo "  $0 --cleanup    # Remove all resources and delete all data"
-    echo "  $0 --status     # Check deployment status"
-    echo ""
-    echo "WARNING: --cleanup will permanently delete all patient data and documents!"
-    echo ""
-}
-
-##############################################################################
-# Status Function
+# Status
 ##############################################################################
 
 show_status() {
     print_header "OpenEMR Deployment Status"
-    
+
     echo ""
     print_info "Project: $PROJECT_NAME"
+    print_info "Storage class: ${STORAGE_CLASS:-<cluster default>}"
     echo ""
-    
+
     echo "=== Pods ==="
     oc get pods -l app.kubernetes.io/part-of=openemr 2>/dev/null || echo "No pods found"
     echo ""
-    
+
     echo "=== Services ==="
     oc get svc -l app.kubernetes.io/part-of=openemr 2>/dev/null || echo "No services found"
     echo ""
-    
+
     echo "=== Routes ==="
     oc get routes openemr 2>/dev/null || echo "No routes found"
     echo ""
-    
+
     echo "=== PVCs ==="
     oc get pvc -l app.kubernetes.io/part-of=openemr 2>/dev/null || echo "No PVCs found"
     echo ""
-    
-    # Show URL if route exists
+
     ROUTE_URL=$(oc get route openemr -o jsonpath='{.spec.host}' 2>/dev/null)
-    if [ -n "$ROUTE_URL" ]; then
-        echo ""
+    if [[ -n "$ROUTE_URL" ]]; then
         print_success "OpenEMR URL: https://$ROUTE_URL"
     fi
 }
 
 ##############################################################################
-# Main Execution
+# Usage
+##############################################################################
+
+show_help() {
+    echo "OpenEMR on OpenShift — Deployment Script"
+    echo ""
+    echo "Usage: $0 [OPTION]"
+    echo ""
+    echo "Options:"
+    echo "  --deploy    Deploy OpenEMR (default)"
+    echo "  --cleanup   Remove all resources INCLUDING PVCs (DELETES ALL DATA!)"
+    echo "  --status    Show deployment status"
+    echo "  --help      Show this help message"
+    echo ""
+    echo "Environment variables:"
+    echo "  STORAGE_CLASS   Override the auto-detected default storage class"
+    echo ""
+    echo "Examples:"
+    echo "  $0                                  # deploy using cluster default storage class"
+    echo "  STORAGE_CLASS=lvms-vg1 $0           # deploy using a specific storage class"
+    echo "  $0 --status                         # check deployment status"
+    echo "  $0 --cleanup                        # remove all resources and data"
+    echo ""
+    echo "WARNING: --cleanup permanently deletes all patient data and documents!"
+}
+
+##############################################################################
+# Main
 ##############################################################################
 
 main() {
@@ -828,7 +805,7 @@ main() {
             exit 0
             ;;
         --cleanup)
-            print_header "OpenEMR on OpenShift - Cleanup"
+            print_header "OpenEMR on OpenShift — Cleanup"
             preflight_checks
             detect_project
             cleanup
@@ -841,7 +818,7 @@ main() {
             exit 0
             ;;
         --deploy|"")
-            print_header "OpenEMR on OpenShift - Deployment Script"
+            print_header "OpenEMR on OpenShift — Deployment"
             preflight_checks
             detect_project
             deploy_mariadb
@@ -858,5 +835,4 @@ main() {
     esac
 }
 
-# Run main function with any passed arguments
 main "$@"

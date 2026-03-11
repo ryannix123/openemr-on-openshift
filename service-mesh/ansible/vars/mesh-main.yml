@@ -1,0 +1,49 @@
+---
+# =============================================================================
+# OpenEMR Service Mesh — Ansible Variables
+# OpenShift Service Mesh 3 (Ambient Mode)
+#
+# Override at runtime:
+#   ansible-playbook deploy-mesh.yml -e "namespace=my-emr"
+#   ansible-playbook deploy-mesh.yml -e "action=status"
+#   ansible-playbook deploy-mesh.yml -e "@vars/prod.yml"
+# =============================================================================
+
+# ── Action ────────────────────────────────────────────────────────────────────
+# full          — everything: operators, control plane, policies, Kiali
+# operators     — Sail + Kiali operators and Gateway API CRDs only
+# control-plane — Istio CR + IstioCNI + ZTunnel (operators must exist)
+# policies      — namespace enrollment, waypoint, AuthZ, NetworkPolicy, Egress
+# status        — display mesh status
+# cleanup       — remove mesh config from namespace (control plane left intact)
+action: full
+
+# ── Namespaces ────────────────────────────────────────────────────────────────
+namespace:      openemr       # namespace where OpenEMR is deployed
+istio_namespace: istio-system
+cni_namespace:   istio-cni
+
+# ── Operator versions ─────────────────────────────────────────────────────────
+istio_version: v1.27-latest        # Istio version deployed by Sail Operator
+
+# ── OLM ───────────────────────────────────────────────────────────────────────
+olm_namespace: openshift-operators
+
+# ── Gateway API CRDs ──────────────────────────────────────────────────────────
+gateway_api_version: v1.1.0
+gateway_api_url: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml"
+
+# ── Wait tuning ───────────────────────────────────────────────────────────────
+# retries * delay = total wait time
+csv_retries:       60    # CSV Succeeded     (60 * 10s = 600s)
+csv_delay:         10
+crd_retries:       60    # CRD Established   (60 * 5s  = 300s)
+crd_delay:          5
+istio_retries:     36    # Istio CR Ready    (36 * 5s  = 180s)
+istio_delay:        5
+ztunnel_retries:   24    # ZTunnel CR Ready  (24 * 5s  = 120s)
+ztunnel_delay:      5
+waypoint_retries:  18    # Gateway Programmed (18 * 5s = 90s)
+waypoint_delay:     5
+pod_retries:       60    # Pod Ready         (60 * 5s  = 300s)
+pod_delay:          5

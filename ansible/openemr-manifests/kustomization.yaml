@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: openemr
+
+resources:
+  - 01-mariadb-secret.yaml
+  - 02-mariadb-pvc.yaml
+  - 03-mariadb-deployment.yaml
+  - 04-mariadb-service.yaml
+  - 05-redis-deployment.yaml
+  - 06-redis-service.yaml
+  - 07-openemr-pvc.yaml
+  - 08-openemr-secret.yaml
+  - 09-openemr-deployment.yaml
+  - 10-openemr-service.yaml
+  - 11-openemr-route.yaml

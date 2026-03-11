@@ -1,0 +1,1298 @@
+---
+# =============================================================================
+# OpenEMR Service Mesh — Ansible Deployment Playbook
+# OpenShift Service Mesh 3 (Ambient Mode)
+#
+# Requirements:
+#   pip install ansible kubernetes
+#   ansible-galaxy collection install kubernetes.core
+#
+# Usage:
+#   ansible-playbook deploy-mesh.yml                              # full deploy
+#   ansible-playbook deploy-mesh.yml -e "action=operators"
+#   ansible-playbook deploy-mesh.yml -e "action=control-plane"
+#   ansible-playbook deploy-mesh.yml -e "action=policies"
+#   ansible-playbook deploy-mesh.yml -e "action=status"
+#   ansible-playbook deploy-mesh.yml -e "action=cleanup"
+#   ansible-playbook deploy-mesh.yml -e "namespace=my-emr"
+#   ansible-playbook deploy-mesh.yml -e "grafana_admin_password=MySecret1!"
+#   ansible-playbook deploy-mesh.yml -e "@vars/prod.yml"
+#
+# Author: Ryan Nix <ryan.nix@gmail.com>
+# =============================================================================
+
+- name: OpenEMR Service Mesh (OSSM 3 Ambient Mode)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/mesh-main.yml
+
+  # ---------------------------------------------------------------------------
+  # PRE-TASKS: Validate environment
+  # ---------------------------------------------------------------------------
+  pre_tasks:
+
+    - name: Verify oc CLI is available
+      ansible.builtin.command: which oc
+      register: oc_check
+      changed_when: false
+      failed_when: oc_check.rc != 0
+
+    - name: Verify OpenShift login
+      ansible.builtin.command: oc whoami
+      register: oc_whoami
+      changed_when: false
+      failed_when: oc_whoami.rc != 0
+
+    - name: Display run parameters
+      ansible.builtin.debug:
+        msg:
+          - "Logged in as : {{ oc_whoami.stdout }}"
+          - "Action       : {{ action }}"
+          - "Namespace    : {{ namespace }}"
+
+    - name: Verify cluster-admin (required for Sail Operator and IstioCNI)
+      ansible.builtin.command: oc auth can-i create namespaces --all-namespaces
+      register: admin_check
+      changed_when: false
+      failed_when: admin_check.rc != 0
+      when: action in ['full', 'operators', 'control-plane']
+
+    - name: Set CNI defaults (safe fallback — overridden below if cluster-admin)
+      ansible.builtin.set_fact:
+        cni_type: "unknown"
+        skip_egress: true
+
+    - name: Detect CNI plugin
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: Network
+        name: cluster
+      register: network_config
+      failed_when: false
+      when: action in ['full', 'operators', 'policies']
+
+    - name: Set CNI facts (cluster-admin path)
+      ansible.builtin.set_fact:
+        cni_type: "{{ network_config.resources[0].spec.networkType | default('unknown') }}"
+        skip_egress: "{{ network_config.resources[0].spec.networkType | default('unknown') != 'OVNKubernetes' }}"
+      when:
+        - action in ['full', 'operators', 'policies']
+        - network_config is defined
+        - network_config.resources is defined
+        - network_config.resources | length > 0
+
+    - name: Warn if not OVN-Kubernetes
+      ansible.builtin.debug:
+        msg: "WARNING: CNI is '{{ cni_type }}' — EgressFirewall requires OVNKubernetes and will be skipped."
+      when: skip_egress | bool
+
+    - name: Confirm OVN-Kubernetes CNI
+      ansible.builtin.debug:
+        msg: "CNI: {{ cni_type }} ✓"
+      when: not skip_egress | bool
+
+  # ---------------------------------------------------------------------------
+  # TASKS
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # ── STATUS ────────────────────────────────────────────────────────────────
+    - name: Show mesh status
+      when: action == 'status'
+      block:
+
+        - name: Get Sail Operator CSV
+          kubernetes.core.k8s_info:
+            kind: ClusterServiceVersion
+            namespace: "{{ olm_namespace }}"
+          register: csv_list
+
+        - name: Get Istio CR
+          kubernetes.core.k8s_info:
+            api_version: sailoperator.io/v1
+            kind: Istio
+            name: default
+            namespace: "{{ istio_namespace }}"
+          register: istio_cr
+          failed_when: false
+
+        - name: Get ZTunnel CR
+          kubernetes.core.k8s_info:
+            api_version: sailoperator.io/v1
+            kind: ZTunnel
+            name: default
+            namespace: "{{ istio_namespace }}"
+          register: ztunnel_cr
+          failed_when: false
+
+        - name: Get ztunnel DaemonSet
+          kubernetes.core.k8s_info:
+            kind: DaemonSet
+            name: ztunnel
+            namespace: "{{ istio_namespace }}"
+          register: ztunnel_ds
+          failed_when: false
+
+        - name: Get namespace ambient label
+          kubernetes.core.k8s_info:
+            kind: Namespace
+            name: "{{ namespace }}"
+          register: ns_info
+          failed_when: false
+
+        - name: Get waypoint Gateway
+          kubernetes.core.k8s_info:
+            api_version: gateway.networking.k8s.io/v1
+            kind: Gateway
+            name: waypoint
+            namespace: "{{ namespace }}"
+          register: waypoint_info
+          failed_when: false
+
+        - name: Get AuthorizationPolicies
+          kubernetes.core.k8s_info:
+            api_version: security.istio.io/v1
+            kind: AuthorizationPolicy
+            namespace: "{{ namespace }}"
+          register: authz_policies
+          failed_when: false
+
+        - name: Get NetworkPolicies
+          kubernetes.core.k8s_info:
+            kind: NetworkPolicy
+            namespace: "{{ namespace }}"
+          register: net_policies
+          failed_when: false
+
+        - name: Get EgressFirewall
+          kubernetes.core.k8s_info:
+            api_version: k8s.ovn.org/v1
+            kind: EgressFirewall
+            namespace: "{{ namespace }}"
+          register: egress_fw
+          failed_when: false
+
+        - name: Get Kiali route
+          ansible.builtin.command: >
+            oc get route kiali -n {{ istio_namespace }}
+            -o jsonpath='{.spec.host}'
+          register: kiali_route
+          changed_when: false
+          failed_when: false
+
+        - name: Get enrolled pods
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ namespace }}"
+          register: ns_pods
+          failed_when: false
+
+        - name: Display status
+          ansible.builtin.debug:
+            msg:
+              - "════════════════════════════════════════════"
+              - "  OpenEMR Ambient Mesh Status"
+              - "  Namespace: {{ namespace }}"
+              - "════════════════════════════════════════════"
+              - "Sail Operator CSV: {{ csv_list.resources |
+                  selectattr('metadata.name', 'search', 'servicemeshoperator3') |
+                  map(attribute='status.phase') | list | first | default('Not found') }}"
+              - "Istio CR Ready: {{ (istio_cr.resources[0].status.conditions | default([]) |
+                  selectattr('type', 'equalto', 'Ready') |
+                  selectattr('status', 'equalto', 'True') | list | length > 0)
+                  if istio_cr.resources | length > 0 else 'Not deployed' }}"
+              - "ZTunnel CR: {{ ztunnel_cr.resources[0].status.state | default('Not deployed')
+                  if ztunnel_cr.resources | length > 0 else 'Not deployed' }}"
+              - "ztunnel DaemonSet: desired={{ ztunnel_ds.resources[0].status.desiredNumberScheduled
+                  | default('?') }} ready={{ ztunnel_ds.resources[0].status.numberReady
+                  | default('?') }}"
+              - "Namespace ambient label: {{ ns_info.resources[0].metadata.labels
+                  ['istio.io/dataplane-mode'] | default('NOT SET')
+                  if ns_info.resources | length > 0 else 'Namespace not found' }}"
+              - "Waypoint Programmed: {{ (waypoint_info.resources[0].status.conditions | default([]) |
+                  selectattr('type', 'equalto', 'Programmed') |
+                  selectattr('status', 'equalto', 'True') | list | length > 0)
+                  if waypoint_info.resources | length > 0 else 'Not deployed' }}"
+              - "AuthorizationPolicies: {{ authz_policies.resources | map(attribute='metadata.name') | list }}"
+              - "NetworkPolicies: {{ net_policies.resources | map(attribute='metadata.name') | list }}"
+              - "EgressFirewall: {{ egress_fw.resources | map(attribute='metadata.name') | list }}"
+              - "Kiali: https://{{ kiali_route.stdout | default('not deployed') }}"
+              - "Enrolled pods: {{ ns_pods.resources |
+                  map(attribute='metadata.annotations') |
+                  selectattr('ambient.istio.io/redirection', 'defined') |
+                  selectattr('ambient.istio.io/redirection', 'equalto', 'enabled') |
+                  list | length }} / {{ ns_pods.resources | length }} pods"
+
+    # ── CLEANUP ───────────────────────────────────────────────────────────────
+    - name: Clean up mesh config from namespace
+      when: action == 'cleanup'
+      block:
+
+        - name: Confirm cleanup
+          ansible.builtin.pause:
+            prompt: |
+              This will remove all mesh config from namespace '{{ namespace }}'.
+              The control plane (Istio, ZTunnel, operators) will NOT be removed.
+              Press ENTER to continue or Ctrl+C to abort.
+
+        - name: Remove EgressFirewall
+          kubernetes.core.k8s:
+            api_version: k8s.ovn.org/v1
+            kind: EgressFirewall
+            name: default
+            namespace: "{{ namespace }}"
+            state: absent
+          failed_when: false
+
+        - name: Remove NetworkPolicies
+          kubernetes.core.k8s:
+            kind: NetworkPolicy
+            name: "{{ item }}"
+            namespace: "{{ namespace }}"
+            state: absent
+          loop:
+            - deny-all-ingress
+            - allow-router-to-openemr
+            - allow-openemr-to-mariadb
+            - allow-openemr-to-redis
+            - allow-ztunnel-hbone
+          failed_when: false
+
+        - name: Remove AuthorizationPolicies
+          kubernetes.core.k8s:
+            api_version: security.istio.io/v1
+            kind: AuthorizationPolicy
+            name: "{{ item }}"
+            namespace: "{{ namespace }}"
+            state: absent
+          loop:
+            - deny-all
+            - allow-ingress-to-openemr
+            - allow-openemr-to-mariadb
+            - allow-openemr-to-redis
+          failed_when: false
+
+        - name: Remove waypoint Gateway
+          kubernetes.core.k8s:
+            api_version: gateway.networking.k8s.io/v1
+            kind: Gateway
+            name: waypoint
+            namespace: "{{ namespace }}"
+            state: absent
+          failed_when: false
+
+        - name: Remove ambient enrollment label from namespace
+          kubernetes.core.k8s:
+            kind: Namespace
+            name: "{{ namespace }}"
+            state: present
+            definition:
+              metadata:
+                labels:
+                  istio.io/dataplane-mode: null
+
+        - name: Cleanup complete
+          ansible.builtin.debug:
+            msg:
+              - "Mesh config removed from '{{ namespace }}'."
+              - "Control plane left intact."
+              - ""
+              - "To remove the control plane:"
+              - "  oc delete kiali/kiali -n {{ istio_namespace }}"
+              - "  oc delete ztunnel/default -n {{ istio_namespace }}"
+              - "  oc delete istio/default -n {{ istio_namespace }}"
+              - "  oc delete istiocni/default -n {{ cni_namespace }}"
+              - "  oc delete namespace {{ istio_namespace }} {{ cni_namespace }}"
+
+    # ── DEPLOY ────────────────────────────────────────────────────────────────
+
+    # -- Gateway API CRDs -----------------------------------------------------
+    - name: Install Gateway API CRDs
+      when: action in ['full', 'operators']
+      block:
+
+        - name: Check if Gateway API CRDs are already installed
+          kubernetes.core.k8s_info:
+            kind: CustomResourceDefinition
+            name: gateways.gateway.networking.k8s.io
+          register: gateway_crd_check
+
+        - name: Apply Gateway API CRDs from upstream release
+          ansible.builtin.command: >
+            oc apply -f {{ gateway_api_url }}
+          when: gateway_crd_check.resources | length == 0
+          register: gateway_crd_apply
+          changed_when: "'created' in gateway_crd_apply.stdout or 'configured' in gateway_crd_apply.stdout"
+
+        - name: Wait for Gateway CRD to be Established
+          kubernetes.core.k8s_info:
+            kind: CustomResourceDefinition
+            name: gateways.gateway.networking.k8s.io
+          register: crd_info
+          until: >
+            crd_info.resources | length > 0 and
+            (crd_info.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Established') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ crd_retries }}"
+          delay: "{{ crd_delay }}"
+          when: gateway_crd_check.resources | length == 0
+
+        - name: Gateway API CRDs ready
+          ansible.builtin.debug:
+            msg: "Gateway API CRDs installed and Established ✓"
+
+    # -- Sail Operator --------------------------------------------------------
+    - name: Install Sail Operator
+      when: action in ['full', 'operators']
+      block:
+
+        - name: Check for existing Sail Operator subscription
+          kubernetes.core.k8s_info:
+            kind: Subscription
+            api_version: operators.coreos.com/v1alpha1
+            name: servicemeshoperator3
+            namespace: "{{ olm_namespace }}"
+          register: sail_sub_check
+
+        - name: Apply Sail Operator subscription
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: operators.coreos.com/v1alpha1
+              kind: Subscription
+              metadata:
+                name: servicemeshoperator3
+                namespace: "{{ olm_namespace }}"
+              spec:
+                channel: stable
+                name: servicemeshoperator3
+                source: redhat-operators
+                sourceNamespace: openshift-marketplace
+                installPlanApproval: Automatic
+          when: sail_sub_check.resources | length == 0
+
+        - name: Wait for Sail Operator CSV to succeed
+          kubernetes.core.k8s_info:
+            kind: ClusterServiceVersion
+            namespace: "{{ olm_namespace }}"
+          register: csv_list
+          until: >
+            csv_list.resources |
+            selectattr('metadata.name', 'search', 'servicemeshoperator3') |
+            selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+          retries: "{{ csv_retries }}"
+          delay: "{{ csv_delay }}"
+
+        - name: Wait for istios CRD to be Established
+          kubernetes.core.k8s_info:
+            kind: CustomResourceDefinition
+            name: istios.sailoperator.io
+          register: crd_info
+          until: >
+            crd_info.resources | length > 0 and
+            (crd_info.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Established') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ crd_retries }}"
+          delay: "{{ crd_delay }}"
+
+        - name: Wait for istiocnis CRD to be Established
+          kubernetes.core.k8s_info:
+            kind: CustomResourceDefinition
+            name: istiocnis.sailoperator.io
+          register: crd_info
+          until: >
+            crd_info.resources | length > 0 and
+            (crd_info.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Established') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ crd_retries }}"
+          delay: "{{ crd_delay }}"
+
+        - name: Wait for ztunnels CRD to be Established
+          kubernetes.core.k8s_info:
+            kind: CustomResourceDefinition
+            name: ztunnels.sailoperator.io
+          register: crd_info
+          until: >
+            crd_info.resources | length > 0 and
+            (crd_info.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Established') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ crd_retries }}"
+          delay: "{{ crd_delay }}"
+
+        - name: Sail Operator ready
+          ansible.builtin.debug:
+            msg: "Sail Operator CSV Succeeded, all CRDs Established ✓"
+
+    # -- Kiali Operator -------------------------------------------------------
+    - name: Install Kiali Operator
+      when: action in ['full', 'operators']
+      block:
+
+        - name: Check for existing Kiali Operator subscription
+          kubernetes.core.k8s_info:
+            kind: Subscription
+            api_version: operators.coreos.com/v1alpha1
+            name: kiali-ossm
+            namespace: "{{ olm_namespace }}"
+          register: kiali_sub_check
+
+        - name: Apply Kiali Operator subscription
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: operators.coreos.com/v1alpha1
+              kind: Subscription
+              metadata:
+                name: kiali-ossm
+                namespace: "{{ olm_namespace }}"
+              spec:
+                channel: stable
+                name: kiali-ossm
+                source: redhat-operators
+                sourceNamespace: openshift-marketplace
+                installPlanApproval: Automatic
+          when: kiali_sub_check.resources | length == 0
+
+        - name: Wait for Kiali Operator CSV to succeed
+          kubernetes.core.k8s_info:
+            kind: ClusterServiceVersion
+            namespace: "{{ olm_namespace }}"
+          register: csv_list
+          until: >
+            csv_list.resources |
+            selectattr('metadata.name', 'search', 'kiali') |
+            selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+          retries: "{{ csv_retries }}"
+          delay: "{{ csv_delay }}"
+
+        - name: Wait for kialis CRD to be Established
+          kubernetes.core.k8s_info:
+            kind: CustomResourceDefinition
+            name: kialis.kiali.io
+          register: crd_info
+          until: >
+            crd_info.resources | length > 0 and
+            (crd_info.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Established') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ crd_retries }}"
+          delay: "{{ crd_delay }}"
+
+        - name: Kiali Operator ready
+          ansible.builtin.debug:
+            msg: "Kiali Operator CSV Succeeded ✓"
+
+    # -- Istio control plane --------------------------------------------------
+    - name: Deploy Istio control plane
+      when: action in ['full', 'control-plane']
+      block:
+
+        - name: Ensure istio-system namespace exists
+          kubernetes.core.k8s:
+            kind: Namespace
+            name: "{{ istio_namespace }}"
+            state: present
+
+        - name: Ensure istio-cni namespace exists
+          kubernetes.core.k8s:
+            kind: Namespace
+            name: "{{ cni_namespace }}"
+            state: present
+
+        - name: Apply IstioCNI CR
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: sailoperator.io/v1
+              kind: IstioCNI
+              metadata:
+                name: default
+              spec:
+                version: "{{ istio_version }}"
+                namespace: "{{ cni_namespace }}"
+                profile: ambient
+                values:
+                  cni:
+                    ambient:
+                      enabled: true
+
+        - name: Apply ZTunnel CR
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: sailoperator.io/v1
+              kind: ZTunnel
+              metadata:
+                name: default
+              spec:
+                version: "{{ istio_version }}"
+                namespace: "{{ istio_namespace }}"
+                values:
+                  global:
+                    platform: openshift
+
+        - name: Apply Istio CR (ambient profile)
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: sailoperator.io/v1
+              kind: Istio
+              metadata:
+                name: default
+              spec:
+                version: "{{ istio_version }}"
+                namespace: "{{ istio_namespace }}"
+                profile: ambient
+                values:
+                  pilot:
+                    # Required: tells istiod to trust ztunnel SA for workload
+                    # cert impersonation. Without this, ztunnel cannot get
+                    # SPIFFE certs and all mesh traffic fails.
+                    trustedZtunnelNamespace: "{{ istio_namespace }}"
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 256Mi
+                  global:
+                    platform: openshift
+
+        - name: Wait for Istio CR to become Ready
+          kubernetes.core.k8s_info:
+            api_version: sailoperator.io/v1
+            kind: Istio
+            name: default
+            namespace: "{{ istio_namespace }}"
+          register: istio_cr
+          until: >
+            istio_cr.resources | length > 0 and
+            (istio_cr.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Ready') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ istio_retries }}"
+          delay: "{{ istio_delay }}"
+
+        - name: Wait for ZTunnel CR to become Ready
+          kubernetes.core.k8s_info:
+            api_version: sailoperator.io/v1
+            kind: ZTunnel
+            name: default
+            namespace: "{{ istio_namespace }}"
+          register: ztunnel_cr
+          until: >
+            ztunnel_cr.resources | length > 0 and
+            (ztunnel_cr.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Ready') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ ztunnel_retries }}"
+          delay: "{{ ztunnel_delay }}"
+
+        - name: Wait for ztunnel DaemonSet to be fully ready
+          kubernetes.core.k8s_info:
+            kind: DaemonSet
+            name: ztunnel
+            namespace: "{{ istio_namespace }}"
+          register: ztunnel_ds
+          until: >
+            ztunnel_ds.resources | length > 0 and
+            ztunnel_ds.resources[0].status.desiredNumberScheduled is defined and
+            ztunnel_ds.resources[0].status.numberReady is defined and
+            ztunnel_ds.resources[0].status.numberReady ==
+            ztunnel_ds.resources[0].status.desiredNumberScheduled
+          retries: "{{ pod_retries }}"
+          delay: "{{ pod_delay }}"
+
+        - name: Wait for Istiod deployment to be ready
+          kubernetes.core.k8s_info:
+            kind: Deployment
+            name: istiod
+            namespace: "{{ istio_namespace }}"
+          register: istiod_dep
+          until: >
+            istiod_dep.resources | length > 0 and
+            (istiod_dep.resources[0].status.readyReplicas | default(0)) ==
+            (istiod_dep.resources[0].spec.replicas | default(1))
+          retries: "{{ pod_retries }}"
+          delay: "{{ pod_delay }}"
+
+        - name: Control plane ready
+          ansible.builtin.debug:
+            msg: "Istio control plane ready — Istiod and ztunnel running ✓"
+
+        # Required post-deploy steps not handled by the Sail Operator
+
+        - name: Label istio-system namespace for istio-discovery
+          kubernetes.core.k8s:
+            kind: Namespace
+            name: "{{ istio_namespace }}"
+            state: present
+            definition:
+              metadata:
+                labels:
+                  istio-discovery: enabled
+
+        - name: Label istio-cni namespace for istio-discovery
+          kubernetes.core.k8s:
+            kind: Namespace
+            name: "{{ cni_namespace }}"
+            state: present
+            definition:
+              metadata:
+                labels:
+                  istio-discovery: enabled
+
+        - name: Create ztunnel impersonation ClusterRole
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: ztunnel-impersonate
+              rules:
+                - apiGroups: [""]
+                  resources: ["serviceaccounts"]
+                  verbs: ["impersonate"]
+
+        - name: Create ztunnel impersonation ClusterRoleBinding
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: ztunnel-impersonate
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: ztunnel-impersonate
+              subjects:
+                - kind: ServiceAccount
+                  name: ztunnel
+                  namespace: "{{ istio_namespace }}"
+
+        - name: Restart istiod to pick up trustedZtunnelNamespace
+          kubernetes.core.k8s:
+            kind: Deployment
+            name: istiod
+            namespace: "{{ istio_namespace }}"
+            state: present
+            definition:
+              spec:
+                template:
+                  metadata:
+                    annotations:
+                      kubectl.kubernetes.io/restartedAt: "{{ ansible_date_time.iso8601 }}"
+
+        - name: Wait for istiod to be ready after restart
+          kubernetes.core.k8s_info:
+            kind: Deployment
+            name: istiod
+            namespace: "{{ istio_namespace }}"
+          register: istiod_dep
+          until: >
+            istiod_dep.resources | length > 0 and
+            (istiod_dep.resources[0].status.readyReplicas | default(0)) ==
+            (istiod_dep.resources[0].spec.replicas | default(1))
+          retries: "{{ pod_retries }}"
+          delay: "{{ pod_delay }}"
+
+    # -- Namespace enrollment -------------------------------------------------
+    - name: Enroll namespace in ambient mesh
+      when: action in ['full', 'policies']
+      block:
+
+        - name: Ensure target namespace exists
+          kubernetes.core.k8s:
+            kind: Namespace
+            name: "{{ namespace }}"
+            state: present
+          failed_when: false
+          register: ns_create
+
+        - name: Label namespace for ambient enrollment and waypoint
+          # Requires ambient-namespace-enroller ClusterRole — see README Privilege Requirements.
+          # A cluster-admin must run once:
+          #   oc adm policy add-cluster-role-to-user ambient-namespace-enroller <username>
+          ansible.builtin.command: >
+            oc label namespace {{ namespace }}
+            istio.io/dataplane-mode=ambient
+            istio.io/use-waypoint=waypoint
+            kubernetes.io/metadata.name={{ namespace }}
+            --overwrite
+          register: ns_label
+          changed_when: "'labeled' in ns_label.stdout or 'not labeled' not in ns_label.stdout"
+          failed_when: false
+
+        - name: Annotate namespace with use-waypoint
+          ansible.builtin.command: >
+            oc annotate namespace {{ namespace }}
+            istio.io/use-waypoint=waypoint
+            --overwrite
+          register: ns_annotate
+          changed_when: true
+          failed_when: false
+
+        - name: Warn if namespace labeling failed (needs ambient-namespace-enroller ClusterRole)
+          ansible.builtin.debug:
+            msg: >
+              WARNING: Could not label namespace '{{ namespace }}' for ambient enrollment.
+              A cluster-admin must grant the ambient-namespace-enroller ClusterRole:
+                oc adm policy add-cluster-role-to-user ambient-namespace-enroller <username>
+              Then re-run this playbook. Error: {{ ns_label.stderr | default('') }}
+          when: ns_label.rc is defined and ns_label.rc != 0
+
+        - name: Namespace enrolled
+          ansible.builtin.debug:
+            msg: "Namespace '{{ namespace }}' enrolled in ambient mode with waypoint — ztunnel intercepts existing pods ✓"
+          when: ns_label.rc is defined and ns_label.rc == 0
+
+    # -- Waypoint proxy -------------------------------------------------------
+    - name: Deploy waypoint proxy
+      when: action in ['full', 'policies']
+      block:
+
+        - name: Apply waypoint Gateway
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: gateway.networking.k8s.io/v1
+              kind: Gateway
+              metadata:
+                name: waypoint
+                namespace: "{{ namespace }}"
+                labels:
+                  # "all" is required — "service" (the default) only intercepts
+                  # traffic to ClusterIP Service addresses. ztunnel will bypass
+                  # the waypoint for pod-to-pod traffic, leaving L7 policies
+                  # unenforced and Kiali metrics empty.
+                  istio.io/waypoint-for: all
+              spec:
+                gatewayClassName: istio-waypoint
+                listeners:
+                  - name: mesh
+                    port: 15008
+                    protocol: HBONE
+
+        - name: Wait for waypoint Gateway to be Programmed
+          kubernetes.core.k8s_info:
+            api_version: gateway.networking.k8s.io/v1
+            kind: Gateway
+            name: waypoint
+            namespace: "{{ namespace }}"
+          register: waypoint_info
+          until: >
+            waypoint_info.resources | length > 0 and
+            (waypoint_info.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Programmed') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ waypoint_retries }}"
+          delay: "{{ waypoint_delay }}"
+
+        - name: Waypoint proxy ready
+          ansible.builtin.debug:
+            msg: "Waypoint proxy Programmed — L7 AuthorizationPolicies active ✓"
+
+    # -- AuthorizationPolicies ------------------------------------------------
+    - name: Apply AuthorizationPolicies
+      when: action in ['full', 'policies']
+      block:
+
+        - name: Apply default-deny AuthorizationPolicy
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: security.istio.io/v1
+              kind: AuthorizationPolicy
+              metadata:
+                name: deny-all
+                namespace: "{{ namespace }}"
+              spec: {}
+
+        - name: Apply allow-ingress-to-openemr AuthorizationPolicy
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: security.istio.io/v1
+              kind: AuthorizationPolicy
+              metadata:
+                name: allow-ingress-to-openemr
+                namespace: "{{ namespace }}"
+              spec:
+                action: ALLOW
+                rules:
+                  - to:
+                      - operation:
+                          ports: ["8080"]
+
+        - name: Apply allow-openemr-to-mariadb AuthorizationPolicy
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: security.istio.io/v1
+              kind: AuthorizationPolicy
+              metadata:
+                name: allow-openemr-to-mariadb
+                namespace: "{{ namespace }}"
+              spec:
+                action: ALLOW
+                rules:
+                  - from:
+                      - source:
+                          principals:
+                            - "cluster.local/ns/{{ namespace }}/sa/default"
+                            # waypoint SA required: with use-waypoint set, ztunnel
+                            # presents the waypoint identity at the destination pod
+                            - "cluster.local/ns/{{ namespace }}/sa/waypoint"
+                    to:
+                      - operation:
+                          ports: ["3306"]
+
+        - name: Apply allow-openemr-to-redis AuthorizationPolicy
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: security.istio.io/v1
+              kind: AuthorizationPolicy
+              metadata:
+                name: allow-openemr-to-redis
+                namespace: "{{ namespace }}"
+              spec:
+                action: ALLOW
+                rules:
+                  - from:
+                      - source:
+                          principals:
+                            - "cluster.local/ns/{{ namespace }}/sa/default"
+                            # waypoint SA required: with use-waypoint set, ztunnel
+                            # presents the waypoint identity at the destination pod
+                            - "cluster.local/ns/{{ namespace }}/sa/waypoint"
+                    to:
+                      - operation:
+                          ports: ["6379"]
+
+        - name: AuthorizationPolicies applied
+          ansible.builtin.debug:
+            msg: "Default-deny active. OpenEMR → MariaDB and Redis allowed via waypoint ✓"
+
+    # -- NetworkPolicies ------------------------------------------------------
+    - name: Apply NetworkPolicy
+      when: action in ['full', 'policies']
+      block:
+
+        # In ambient mode, ztunnel intercepts all traffic at the node level via
+        # HBONE. From the perspective of the pod network / NetworkPolicy, all
+        # inbound connections appear to come from ztunnel, not from the original
+        # source namespace or pod. This means granular per-service NetworkPolicies
+        # (deny-all + allow-router + allow-pod-to-pod) always block traffic
+        # regardless of how they are written, because the actual source identity
+        # is ztunnel rather than the router or a peer pod.
+        #
+        # AuthorizationPolicies enforced by ztunnel and the waypoint proxy
+        # provide equivalent or stronger isolation (identity-based via SPIFFE,
+        # not IP-based). NetworkPolicy is therefore set to allow-all here so
+        # it does not conflict with the mesh enforcement layer.
+        - name: Apply allow-all-ingress NetworkPolicy
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: networking.k8s.io/v1
+              kind: NetworkPolicy
+              metadata:
+                name: allow-all-ingress
+                namespace: "{{ namespace }}"
+              spec:
+                podSelector: {}
+                policyTypes:
+                  - Ingress
+                ingress:
+                  - {}
+
+        - name: NetworkPolicy applied (allow-all — enforcement delegated to ztunnel AuthzPolicies)
+          ansible.builtin.debug:
+            msg: "NetworkPolicy applied — ingress open, enforcement handled by ztunnel AuthorizationPolicies ✓"
+
+    # -- EgressFirewall -------------------------------------------------------
+    - name: Apply EgressFirewall
+      when: action in ['full', 'policies'] and not skip_egress | bool
+      block:
+
+        - name: Apply EgressFirewall
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: k8s.ovn.org/v1
+              kind: EgressFirewall
+              metadata:
+                name: default
+                namespace: "{{ namespace }}"
+              spec:
+                egress:
+                  - type: Allow
+                    to:
+                      dnsName: quay.io
+                  - type: Allow
+                    to:
+                      dnsName: docker.io
+                  - type: Allow
+                    to:
+                      dnsName: open-emr.org
+                  - type: Allow
+                    to:
+                      dnsName: "*.open-emr.org"
+                  - type: Allow
+                    to:
+                      cidrSelector: 0.0.0.0/0
+                    ports:
+                      - protocol: TCP
+                        port: 443
+                  - type: Deny
+                    to:
+                      cidrSelector: 0.0.0.0/0
+
+        - name: EgressFirewall applied
+          ansible.builtin.debug:
+            msg: "EgressFirewall applied — outbound restricted to allow-list ✓"
+
+    - name: Skip EgressFirewall (non-OVN CNI)
+      when: action in ['full', 'policies'] and skip_egress | bool
+      ansible.builtin.debug:
+        msg: "EgressFirewall skipped — requires OVNKubernetes CNI (detected: {{ cni_type }})"
+
+    # -- Kiali CR -------------------------------------------------------------
+    - name: Deploy Kiali instance
+      when: action in ['full']
+      block:
+
+        - name: Apply Kiali CR
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: kiali.io/v1alpha1
+              kind: Kiali
+              metadata:
+                name: kiali
+                namespace: "{{ istio_namespace }}"
+              spec:
+                auth:
+                  strategy: openshift
+                deployment:
+                  accessible_namespaces:
+                    - "{{ namespace }}"
+                external_services:
+                  istio:
+                    config_map_name: istio
+                    istio_sidecar_injector_config_map_name: ""
+                    url_service_version: ""
+                  prometheus:
+                    # OpenShift user-workload monitoring via Thanos querier.
+                    # Requires: enableUserWorkload: true in cluster-monitoring-config
+                    # and cluster-monitoring-view granted to kiali-service-account.
+                    url: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
+                    auth:
+                      type: bearer
+                      use_kiali_token: true
+                  tracing:
+                    enabled: false
+
+        - name: Grant Kiali cluster-monitoring-view for Prometheus access
+          ansible.builtin.command: >
+            oc adm policy add-cluster-role-to-user cluster-monitoring-view
+            system:serviceaccount:{{ istio_namespace }}:kiali-service-account
+          changed_when: true
+
+        - name: Wait for Kiali deployment to be ready
+          kubernetes.core.k8s_info:
+            kind: Deployment
+            name: kiali
+            namespace: "{{ istio_namespace }}"
+          register: kiali_dep
+          until: >
+            kiali_dep.resources | length > 0 and
+            (kiali_dep.resources[0].status.readyReplicas | default(0)) ==
+            (kiali_dep.resources[0].spec.replicas | default(1))
+          retries: "{{ pod_retries }}"
+          delay: "{{ pod_delay }}"
+          failed_when: false
+
+        - name: Get Kiali route
+          ansible.builtin.command: >
+            oc get route kiali -n {{ istio_namespace }}
+            -o jsonpath='https://{.spec.host}'
+          register: kiali_url
+          changed_when: false
+          failed_when: false
+
+        - name: Kiali ready
+          ansible.builtin.debug:
+            msg: "Kiali: {{ kiali_url.stdout | default('route pending') }} ✓"
+
+    # -- Grafana --------------------------------------------------------------
+    - name: Deploy Grafana
+      when: action in ['full', 'grafana']
+      block:
+
+        - name: Check for existing Grafana Operator subscription
+          kubernetes.core.k8s_info:
+            kind: Subscription
+            api_version: operators.coreos.com/v1alpha1
+            name: grafana-operator
+            namespace: "{{ olm_namespace }}"
+          register: grafana_sub_check
+
+        - name: Apply Grafana Operator subscription (community-operators)
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: operators.coreos.com/v1alpha1
+              kind: Subscription
+              metadata:
+                name: grafana-operator
+                namespace: "{{ olm_namespace }}"
+              spec:
+                channel: v5
+                name: grafana-operator
+                source: community-operators
+                sourceNamespace: openshift-marketplace
+                installPlanApproval: Automatic
+          when: grafana_sub_check.resources | length == 0
+
+        - name: Wait for Grafana Operator CSV to succeed
+          kubernetes.core.k8s_info:
+            kind: ClusterServiceVersion
+            namespace: "{{ olm_namespace }}"
+          register: csv_list
+          until: >
+            csv_list.resources |
+            selectattr('metadata.name', 'search', 'grafana-operator') |
+            selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+          retries: "{{ csv_retries }}"
+          delay: "{{ csv_delay }}"
+
+        - name: Wait for Grafana CRD to be Established
+          kubernetes.core.k8s_info:
+            kind: CustomResourceDefinition
+            name: grafanas.grafana.integreatly.org
+          register: crd_info
+          until: >
+            crd_info.resources | length > 0 and
+            (crd_info.resources[0].status.conditions | default([]) |
+             selectattr('type', 'equalto', 'Established') |
+             selectattr('status', 'equalto', 'True') | list | length > 0)
+          retries: "{{ crd_retries }}"
+          delay: "{{ crd_delay }}"
+
+        - name: Apply Grafana instance
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: grafana.integreatly.org/v1beta1
+              kind: Grafana
+              metadata:
+                name: grafana
+                namespace: "{{ istio_namespace }}"
+                labels:
+                  dashboards: grafana
+              spec:
+                deployment:
+                  spec:
+                    template:
+                      spec:
+                        containers:
+                          - name: grafana
+                            resources:
+                              requests:
+                                cpu: 50m
+                                memory: 128Mi
+                config:
+                  auth:
+                    disable_login_form: "false"
+                  security:
+                    admin_user: admin
+                    admin_password: "{{ grafana_admin_password }}"
+
+        - name: Wait for Grafana deployment to be ready
+          kubernetes.core.k8s_info:
+            kind: Deployment
+            namespace: "{{ istio_namespace }}"
+            label_selectors:
+              - "app.kubernetes.io/name=grafana"
+          register: grafana_dep
+          until: >
+            grafana_dep.resources | length > 0 and
+            (grafana_dep.resources[0].status.readyReplicas | default(0)) >= 1
+          retries: "{{ pod_retries }}"
+          delay: "{{ pod_delay }}"
+
+        - name: Check if Grafana route already exists
+          kubernetes.core.k8s_info:
+            kind: Route
+            api_version: route.openshift.io/v1
+            name: grafana
+            namespace: "{{ istio_namespace }}"
+          register: grafana_route_check
+
+        - name: Create Grafana edge route
+          ansible.builtin.command: >
+            oc create route edge grafana
+            --service=grafana-service
+            --port=3000
+            --namespace={{ istio_namespace }}
+            --insecure-policy=Redirect
+          when: grafana_route_check.resources | length == 0
+          changed_when: true
+
+        - name: Get Grafana route host
+          ansible.builtin.command: >
+            oc get route grafana -n {{ istio_namespace }}
+            -o jsonpath='{.spec.host}'
+          register: grafana_host
+          changed_when: false
+
+        - name: Get kiali-service-account token for Prometheus datasource
+          ansible.builtin.command: >
+            oc create token kiali-service-account -n {{ istio_namespace }}
+          register: kiali_token
+          changed_when: false
+
+        - name: Add Prometheus datasource to Grafana
+          ansible.builtin.uri:
+            url: "https://{{ grafana_host.stdout }}/api/datasources"
+            method: POST
+            url_username: admin
+            url_password: "{{ grafana_admin_password }}"
+            force_basic_auth: true
+            validate_certs: false
+            body_format: json
+            body:
+              name: Prometheus
+              type: prometheus
+              url: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
+              access: proxy
+              isDefault: true
+              jsonData:
+                tlsSkipVerify: true
+                httpHeaderName1: Authorization
+              secureJsonData:
+                httpHeaderValue1: "Bearer {{ kiali_token.stdout }}"
+            status_code: [200, 409]  # 409 = already exists
+          register: datasource_result
+
+        - name: Patch Kiali with Grafana external_url and in_cluster_url
+          kubernetes.core.k8s:
+            kind: Kiali
+            api_version: kiali.io/v1alpha1
+            name: kiali
+            namespace: "{{ istio_namespace }}"
+            state: present
+            definition:
+              spec:
+                external_services:
+                  grafana:
+                    enabled: true
+                    external_url: "https://{{ grafana_host.stdout }}"
+                    in_cluster_url: "http://grafana-service.{{ istio_namespace }}:3000"
+                    auth:
+                      type: basic
+                      username: admin
+                      password: "{{ grafana_admin_password }}"
+
+        - name: Restart Kiali to pick up Grafana config
+          kubernetes.core.k8s:
+            kind: Deployment
+            name: kiali
+            namespace: "{{ istio_namespace }}"
+            state: present
+            definition:
+              spec:
+                template:
+                  metadata:
+                    annotations:
+                      kubectl.kubernetes.io/restartedAt: "{{ ansible_date_time.iso8601 }}"
+
+        - name: Grafana ready
+          ansible.builtin.debug:
+            msg: "Grafana: https://{{ grafana_host.stdout }} ✓"
+
+    # -- Monitoring (PodMonitor + RBAC for Kiali traffic graph) ---------------
+    - name: Deploy monitoring resources
+      when: action in ['full', 'policies', 'grafana']
+      block:
+
+        - name: Enable user-workload monitoring (required for waypoint metrics)
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: cluster-monitoring-config
+                namespace: openshift-monitoring
+              data:
+                config.yaml: |
+                  enableUserWorkload: true
+          failed_when: false
+
+        - name: Apply waypoint PodMonitor
+          # The waypoint Envoy exposes Prometheus metrics on port 15090
+          # (http-envoy-prom). Without this PodMonitor, Prometheus never
+          # scrapes the waypoint and Kiali's traffic graph stays empty even
+          # though traffic is flowing correctly through the mesh.
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: monitoring.coreos.com/v1
+              kind: PodMonitor
+              metadata:
+                name: waypoint-metrics
+                namespace: "{{ namespace }}"
+              spec:
+                selector:
+                  matchLabels:
+                    gateway.istio.io/managed: istio.io-mesh-controller
+                podMetricsEndpoints:
+                  - port: http-envoy-prom
+                    path: /stats/prometheus
+                    interval: 15s
+
+        - name: Grant user-workload Prometheus scrape access to namespace
+          # Without this RoleBinding, the Prometheus target list returns empty
+          # for the namespace entirely — PodMonitor is ignored and no metrics
+          # are collected regardless of port configuration.
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: prometheus-user-workload-scrape
+                namespace: "{{ namespace }}"
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: prometheus-user-workload
+              subjects:
+                - kind: ServiceAccount
+                  name: prometheus-user-workload
+                  namespace: openshift-user-workload-monitoring
+
+        - name: Monitoring resources applied
+          ansible.builtin.debug:
+            msg: "PodMonitor + Prometheus RBAC applied — Kiali traffic graph will populate after ~60s ✓"
+
+    # -- Deployment summary ---------------------------------------------------
+    - name: Deployment summary
+      when: action in ['full', 'control-plane', 'policies', 'operators', 'grafana']
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════"
+          - "  OpenEMR Ambient Mesh Deployment Complete"
+          - "  Namespace : {{ namespace }}"
+          - "  Action    : {{ action }}"
+          - "════════════════════════════════════════════"
+          - "Run 'ansible-playbook deploy-mesh.yml -e action=status' to verify."

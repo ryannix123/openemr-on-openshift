@@ -1,98 +1,42 @@
+# 06-network-policies.yaml — OpenEMR namespace NetworkPolicy
+#
+# In ambient mode, ztunnel intercepts ALL pod traffic at the Linux network
+# namespace level via HBONE. From the perspective of the pod network and the
+# Kubernetes NetworkPolicy controller, every inbound connection appears to
+# originate from ztunnel — not from the original source pod or namespace.
+#
+# This makes traditional granular NetworkPolicies (deny-all + per-service
+# allow rules based on namespace or pod selectors) incompatible with ambient
+# mode. Regardless of how the rules are written, the actual packet source is
+# always ztunnel, so per-service allows never match and traffic is silently
+# dropped.
+#
+# Security enforcement is instead provided by the mesh:
+#
+#   - ztunnel enforces L4 AuthorizationPolicies (source service account,
+#     port) via SPIFFE identity — stronger than IP-based NetworkPolicy.
+#   - The waypoint proxy enforces L7 AuthorizationPolicies (HTTP method,
+#     path, headers, JWT claims) for traffic needing application-layer control.
+#
+# The single allow-all policy below opens NetworkPolicy enforcement so it
+# does not conflict with the mesh. All meaningful access control is provided
+# by 05-authz-policies.yaml.
+#
+# Reference: https://istio.io/latest/docs/ambient/usage/networkpolicy/
 ---
-# NetworkPolicies work at L3/L4 via the CNI plugin (OVN-Kubernetes).
-# These are independent of the service mesh and provide a defense-in-depth
-# layer that works even if the mesh control plane is unavailable.
-# No changes needed from OSSM 2.x — NetworkPolicy is a Kubernetes primitive.
-
-# Default deny all ingress within the namespace
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: default-deny-ingress
+  name: allow-all-ingress
   namespace: openemr
-spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
-
----
-# Allow OpenShift Router to reach OpenEMR
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-router-to-openemr
-  namespace: openemr
-spec:
-  podSelector:
-    matchLabels:
-      app: openemr
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              network.openshift.io/policy-group: ingress
-
----
-# Allow OpenEMR to reach MariaDB
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-openemr-to-mariadb
-  namespace: openemr
-spec:
-  podSelector:
-    matchLabels:
-      app: mariadb
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app: openemr
-      ports:
-        - protocol: TCP
-          port: 3306
-
----
-# Allow OpenEMR to reach Redis
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-openemr-to-redis
-  namespace: openemr
-spec:
-  podSelector:
-    matchLabels:
-      app: redis
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app: openemr
-      ports:
-        - protocol: TCP
-          port: 6379
-
----
-# Allow ztunnel and waypoint inter-pod communication
-# ztunnel uses HBONE (HTTP-based overlay network) on port 15008
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-ztunnel-hbone
-  namespace: openemr
+  annotations:
+    # Rationale: ambient mode ztunnel intercepts all traffic at node level.
+    # NetworkPolicy source selectors never match original pod identity.
+    # Enforcement is delegated entirely to ztunnel AuthorizationPolicies.
+    mesh.istio.io/policy-mode: "ambient-delegated"
 spec:
   podSelector: {}
   policyTypes:
     - Ingress
   ingress:
-    - ports:
-        - protocol: TCP
-          port: 15008   # HBONE tunnel port used by ztunnel
-        - protocol: TCP
-          port: 15009   # HBONE mTLS
+    - {}

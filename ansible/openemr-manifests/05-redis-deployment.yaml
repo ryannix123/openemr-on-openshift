@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: redis
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: openemr
+  name: redis
+  namespace: openemr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        app.kubernetes.io/component: cache
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/part-of: openemr
+    spec:
+      containers:
+      - command:
+        - redis-server
+        - --save
+        - ''
+        - --appendonly
+        - 'no'
+        - --maxmemory
+        - 256mb
+        - --maxmemory-policy
+        - allkeys-lru
+        image: docker.io/redis:8-alpine
+        name: redis
+        ports:
+        - containerPort: 6379
+          name: redis
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault

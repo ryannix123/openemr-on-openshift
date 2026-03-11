@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    app.openshift.io/runtime: php
+  labels:
+    app: openemr
+    app.kubernetes.io/component: application
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/name: openemr
+    app.kubernetes.io/part-of: openemr
+    app.kubernetes.io/runtime: php
+    app.kubernetes.io/version: 8.0.0
+  name: openemr
+  namespace: openemr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openemr
+  template:
+    metadata:
+      labels:
+        app: openemr
+        app.kubernetes.io/component: application
+        app.kubernetes.io/name: openemr
+        app.kubernetes.io/part-of: openemr
+        app.kubernetes.io/runtime: php
+        app.kubernetes.io/version: 8.0.0
+    spec:
+      containers:
+      - env:
+        - name: MYSQL_HOST
+          value: mariadb
+        - name: MYSQL_DATABASE
+          valueFrom:
+            secretKeyRef:
+              key: database-name
+              name: mariadb-secret
+        - name: MYSQL_USER
+          valueFrom:
+            secretKeyRef:
+              key: database-user
+              name: mariadb-secret
+        - name: MYSQL_PASS
+          valueFrom:
+            secretKeyRef:
+              key: database-password
+              name: mariadb-secret
+        - name: OE_USER
+          value: admin
+        - name: OE_PASS
+          valueFrom:
+            secretKeyRef:
+              key: admin-password
+              name: openemr-secret
+        - name: DB_HOST
+          value: mariadb
+        - name: DB_PORT
+          value: '3306'
+        - name: DB_DATABASE
+          valueFrom:
+            secretKeyRef:
+              key: database-name
+              name: mariadb-secret
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              key: database-user
+              name: mariadb-secret
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: database-password
+              name: mariadb-secret
+        image: quay.io/ryan_nix/openemr-openshift:latest
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8080
+          periodSeconds: 10
+          timeoutSeconds: 5
+        name: openemr
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            memory: 768Mi
+          requests:
+            cpu: 200m
+            memory: 384Mi
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /var/www/html/openemr/sites/default
+          name: openemr-sites
+      volumes:
+      - name: openemr-sites
+        persistentVolumeClaim:
+          claimName: openemr-sites

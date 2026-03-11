@@ -1,24 +1,27 @@
 ---
 # Ambient mode splits the data plane into two layers:
 #   - ztunnel (per-node DaemonSet): handles L4 mTLS and routing automatically
-#   - waypoint proxy (per-namespace/service Deployment): handles L7 policies
+#   - waypoint proxy (per-namespace Deployment): handles L7 policies
 #
 # AuthorizationPolicies that inspect HTTP headers, JWT claims, or enforce
 # service-level access control REQUIRE a waypoint proxy.
 # Without a waypoint, AuthorizationPolicies are only enforced at L4 by ztunnel.
 #
 # This Gateway creates a waypoint for the entire openemr namespace.
+#
+# IMPORTANT: istio.io/waypoint-for must be set to "all" (not "service" or
+# "namespace"). The default "service" only intercepts traffic destined for
+# Service ClusterIPs. Setting "all" ensures ztunnel routes ALL traffic —
+# including pod-to-pod — through the waypoint proxy, which is required for
+# L7 AuthorizationPolicy enforcement and for Kiali to receive istio_requests_total
+# metrics from the waypoint's Envoy stats port.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: waypoint
   namespace: openemr
   labels:
-    # This label tells Istio this Gateway is a waypoint proxy
-    istio.io/waypoint-for: namespace
-  annotations:
-    # Use the Istio waypoint GatewayClass
-    istio.io/service-account: ""
+    istio.io/waypoint-for: all
 spec:
   gatewayClassName: istio-waypoint
   listeners:

@@ -1,18 +1,22 @@
-apiVersion: sailoperator.io/v1alpha1
+apiVersion: sailoperator.io/v1
 kind: Istio
 metadata:
   name: default
 spec:
-  # OSSM 3 ships Istio 1.23+; ambient is GA in 1.22+
-  version: v1.23.3
+  # OSSM 3.2 with ambient mode GA
+  version: v1.27-latest
   namespace: istio-system
   profile: ambient
   values:
     pilot:
+      # Required: tells istiod to trust ztunnel SA for workload cert impersonation.
+      # Without this, ztunnel cannot get SPIFFE certs and all mesh traffic fails.
+      # Ref: https://docs.redhat.com/en/documentation/red_hat_openshift_service_mesh/3.2/html/installing/ossm-istio-ambient-mode
+      trustedZtunnelNamespace: istio-system
       resources:
         requests:
           cpu: 100m
           memory: 256Mi
     global:
-      # OpenShift requires these for SCCs
+      # OpenShift requires this for SCCs
       platform: openshift

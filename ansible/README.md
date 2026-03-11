@@ -1,7 +1,8 @@
 # OpenEMR on OpenShift — Ansible Deployment
 
 Ansible replacement for `deploy-openemr.sh`. Runs on macOS, Linux, or any
-system with Python and `oc` — no WSL or bash required.
+system with Python and `oc` — no WSL or bash required. Compatible with
+Developer Sandbox, Single Node OpenShift (SNO), and full OpenShift clusters.
 
 ## Prerequisites
 
@@ -20,7 +21,7 @@ oc project <your-namespace>
 ## Usage
 
 ```bash
-# Deploy OpenEMR
+# Deploy OpenEMR (storage class auto-detected from cluster default)
 ansible-playbook deploy-openemr.yml
 
 # Check deployment status
@@ -34,34 +35,44 @@ ansible-playbook deploy-openemr.yml -e "action=cleanup"
 
 All tunables live in `vars/main.yml`. Edit it directly or override at runtime.
 
-| Variable                 | Default                                     | Description                   |
-|--------------------------|---------------------------------------------|-------------------------------|
-| `action`                 | `deploy`                                    | `deploy`, `status`, `cleanup` |
-| `openemr_image`          | `quay.io/ryan_nix/openemr-openshift:latest` | OpenEMR container image       |
-| `mariadb_image`          | `quay.io/fedora/mariadb-118:latest`         | MariaDB container image       |
-| `redis_image`            | `docker.io/redis:8-alpine`                  | Redis container image         |
-| `storage_class`          | `gp3-csi`                                   | StorageClass for PVCs         |
-| `db_storage_size`        | `5Gi`                                       | MariaDB PVC size              |
-| `documents_storage_size` | `10Gi`                                      | OpenEMR sites PVC size        |
-| `redis_max_memory`       | `256mb`                                     | Redis maxmemory limit         |
-| `redis_max_memory_policy`| `allkeys-lru`                               | Redis eviction policy         |
-| `mariadb_resources`      | limits 1Gi/500m, req 512Mi/200m             | MariaDB resource block        |
-| `redis_resources`        | limits 256Mi/250m, req 64Mi/50m             | Redis resource block          |
-| `openemr_resources`      | limits 768Mi/500m, req 384Mi/200m           | OpenEMR resource block        |
-| `mariadb_wait_timeout`   | `300`                                       | Pod ready wait (seconds)      |
-| `redis_wait_timeout`     | `300`                                       | Pod ready wait (seconds)      |
-| `openemr_wait_timeout`   | `300`                                       | Pod ready wait (seconds)      |
-| `manifests_dir`          | `./openemr-manifests`                       | Where to write YAML exports   |
-| `credentials_file`       | `./openemr-credentials.txt`                 | Path for credentials output   |
+| Variable                  | Default                                     | Description                        |
+|---------------------------|---------------------------------------------|------------------------------------|
+| `action`                  | `deploy`                                    | `deploy`, `status`, `cleanup`      |
+| `openemr_image`           | `quay.io/ryan_nix/openemr-openshift:latest` | OpenEMR container image            |
+| `mariadb_image`           | `quay.io/fedora/mariadb-118:latest`         | MariaDB container image            |
+| `redis_image`             | `docker.io/redis:8-alpine`                  | Redis container image              |
+| `storage_class`           | `""` (auto-detected)                        | StorageClass for PVCs              |
+| `db_storage_size`         | `5Gi`                                       | MariaDB PVC size                   |
+| `documents_storage_size`  | `10Gi`                                      | OpenEMR sites PVC size             |
+| `redis_max_memory`        | `256mb`                                     | Redis maxmemory limit              |
+| `redis_max_memory_policy` | `allkeys-lru`                               | Redis eviction policy              |
+| `mariadb_resources`       | limits 1Gi/500m, req 512Mi/200m             | MariaDB resource block             |
+| `redis_resources`         | limits 256Mi/250m, req 64Mi/50m             | Redis resource block               |
+| `openemr_resources`       | limits 768Mi/500m, req 384Mi/200m           | OpenEMR resource block             |
+| `mariadb_wait_timeout`    | `300`                                       | Pod ready wait (seconds)           |
+| `redis_wait_timeout`      | `300`                                       | Pod ready wait (seconds)           |
+| `openemr_wait_timeout`    | `300`                                       | Pod ready wait (seconds)           |
+| `manifests_dir`           | `./openemr-manifests`                       | Where to write YAML exports        |
+| `credentials_file`        | `./openemr-credentials.txt`                 | Path for credentials output        |
 
-**Passwords** (`db_password`, `db_root_password`, `oe_admin_password`) are auto-generated
-on first run. Uncomment and set them in `vars/main.yml` to pin specific values.
+**Storage class auto-detection**: When `storage_class` is empty (the default),
+the playbook queries the cluster for the StorageClass marked with the
+`storageclass.kubernetes.io/is-default-class: "true"` annotation and uses it
+automatically. This means the same playbook works on Developer Sandbox
+(`gp3-csi`), SNO with LVM Storage (`lvms-vg1`), ODF clusters
+(`ocs-storagecluster-ceph-rbd`), and any other OpenShift environment without
+modification.
+
+**Passwords** (`db_password`, `db_root_password`, `oe_admin_password`) are
+auto-generated on first run. Uncomment and set them in `vars/main.yml` to pin
+specific values.
 
 ### Override examples
 
 ```bash
-# Different storage class (ODF/Ceph)
-ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
+# Override storage class for a specific environment
+ansible-playbook deploy-openemr.yml -e "storage_class=lvms-vg1"           # SNO
+ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"  # ODF
 
 # Use a custom vars file (e.g. for a prod environment)
 ansible-playbook deploy-openemr.yml -e "@vars/prod.yml"
@@ -100,4 +111,5 @@ oc apply -k ./openemr-manifests/
 ## Idempotency
 
 Re-running the playbook is safe — existing Secrets are detected and passwords
-are preserved rather than regenerated.
+are preserved rather than regenerated. If the default StorageClass changes
+between runs, set `storage_class` explicitly to avoid PVC conflicts.

@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: mariadb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/name: mariadb
+    app.kubernetes.io/part-of: openemr
+    app.kubernetes.io/runtime: mariadb
+    app.kubernetes.io/version: '11.8'
+  name: mariadb
+  namespace: openemr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: mariadb
+        app.kubernetes.io/component: database
+        app.kubernetes.io/name: mariadb
+        app.kubernetes.io/part-of: openemr
+        app.kubernetes.io/runtime: mariadb
+        app.kubernetes.io/version: '11.8'
+    spec:
+      containers:
+      - env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: database-root-password
+              name: mariadb-secret
+        - name: MYSQL_DATABASE
+          valueFrom:
+            secretKeyRef:
+              key: database-name
+              name: mariadb-secret
+        - name: MYSQL_USER
+          valueFrom:
+            secretKeyRef:
+              key: database-user
+              name: mariadb-secret
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: database-password
+              name: mariadb-secret
+        image: quay.io/fedora/mariadb-118:latest
+        livenessProbe:
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          tcpSocket:
+            port: 3306
+        name: mariadb
+        ports:
+        - containerPort: 3306
+          name: mysql
+        readinessProbe:
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          tcpSocket:
+            port: 3306
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1Gi
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /var/lib/mysql
+          name: mariadb-data
+      volumes:
+      - name: mariadb-data
+        persistentVolumeClaim:
+          claimName: mariadb-data

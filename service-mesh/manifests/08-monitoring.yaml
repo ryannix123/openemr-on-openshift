@@ -1,0 +1,46 @@
+# 08-monitoring.yaml — Prometheus scraping for the waypoint proxy
+#
+# The waypoint proxy (Envoy) exposes Istio metrics on port 15090
+# (http-envoy-prom). Without a PodMonitor, Prometheus never scrapes these
+# and Kiali's traffic graph stays empty even though traffic is flowing.
+#
+# Two resources are required:
+#
+#   PodMonitor  — tells Prometheus Operator to scrape port 15090 on the
+#                 waypoint pod every 15s.
+#
+#   RoleBinding — grants the user-workload Prometheus service account
+#                 permission to discover and scrape pods in this namespace.
+#                 Without this, the Prometheus target list returns empty
+#                 for the openemr namespace entirely.
+#
+# The cluster-monitoring ConfigMap (enableUserWorkload: true) must also be
+# set — deploy-mesh.sh handles this automatically.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: waypoint-metrics
+  namespace: openemr
+spec:
+  selector:
+    matchLabels:
+      gateway.istio.io/managed: istio.io-mesh-controller
+  podMetricsEndpoints:
+  - port: http-envoy-prom
+    path: /stats/prometheus
+    interval: 15s
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-user-workload-scrape
+  namespace: openemr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-user-workload
+subjects:
+- kind: ServiceAccount
+  name: prometheus-user-workload
+  namespace: openshift-user-workload-monitoring

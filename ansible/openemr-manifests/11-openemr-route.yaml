@@ -1,0 +1,20 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  labels:
+    app: openemr
+    app.kubernetes.io/component: application
+    app.kubernetes.io/name: openemr
+    app.kubernetes.io/part-of: openemr
+    app.kubernetes.io/runtime: php
+  name: openemr
+  namespace: openemr
+spec:
+  port:
+    targetPort: http
+  tls:
+    insecureEdgeTerminationPolicy: Redirect
+    termination: edge
+  to:
+    kind: Service
+    name: openemr

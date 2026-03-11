@@ -1,99 +1,81 @@
 ---
 # =============================================================================
-# OpenEMR on OpenShift - Deployment Variables
+# OpenEMR on OpenShift — Ansible Variables
 #
-# Override any value at runtime:
-#   ansible-playbook deploy-openemr.yml -e "@vars/custom.yml"
-#   ansible-playbook deploy-openemr.yml -e "storage_class=ocs-storagecluster-ceph-rbd"
+# Override any variable at runtime:
+#   ansible-playbook deploy-openemr.yml -e "storage_class=lvms-vg1"
+#   ansible-playbook deploy-openemr.yml -e "@vars/prod.yml"
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# Action
-# -----------------------------------------------------------------------------
-# Controls what the playbook does.
-# Options: deploy | cleanup | status
-action: deploy
+# ── Action ────────────────────────────────────────────────────────────────────
+action: deploy   # deploy | status | cleanup
 
-# -----------------------------------------------------------------------------
-# Container Images
-# -----------------------------------------------------------------------------
+# ── Images ────────────────────────────────────────────────────────────────────
 openemr_image: "quay.io/ryan_nix/openemr-openshift:latest"
 mariadb_image: "quay.io/fedora/mariadb-118:latest"
-redis_image: "docker.io/redis:8-alpine"
+redis_image:   "docker.io/redis:8-alpine"
 
-# -----------------------------------------------------------------------------
-# Storage
-# -----------------------------------------------------------------------------
-# StorageClass name — adjust for your cluster:
-#   Developer Sandbox / AWS EBS : gp3-csi
-#   ODF / Ceph RBD              : ocs-storagecluster-ceph-rbd
-#   Azure Disk                  : managed-csi
-#   GCE Persistent Disk         : standard-csi
-storage_class: "gp3-csi"
+# ── Storage ───────────────────────────────────────────────────────────────────
+# Leave storage_class empty to auto-detect the cluster's default StorageClass.
+# Set explicitly to target a specific class:
+#   storage_class: lvms-vg1                          # SNO with LVM Storage
+#   storage_class: ocs-storagecluster-ceph-rbd       # ODF block
+#   storage_class: ocs-storagecluster-cephfs         # ODF file (RWX)
+#   storage_class: gp3-csi                           # Developer Sandbox (AWS EBS)
+storage_class: ""
 
-db_storage_size: "5Gi"
+db_storage_size:        "5Gi"
 documents_storage_size: "10Gi"
 
-# -----------------------------------------------------------------------------
-# Database
-# -----------------------------------------------------------------------------
-db_name: "openemr"
-db_user: "openemr"
-# db_password / db_root_password are auto-generated at deploy time.
-# Set them here (or via -e) to pin specific values.
-# db_password: ""
+# ── Database ──────────────────────────────────────────────────────────────────
+db_name: openemr
+db_user: openemr
+
+# Passwords — leave commented to auto-generate on first run.
+# Uncomment to pin specific values (useful for reprovisioning).
+# db_password:      ""
 # db_root_password: ""
 
-# -----------------------------------------------------------------------------
-# OpenEMR Admin
-# -----------------------------------------------------------------------------
-oe_admin_user: "admin"
-# oe_admin_password is auto-generated at deploy time.
-# Set it here (or via -e) to pin a specific value.
+# ── OpenEMR admin ─────────────────────────────────────────────────────────────
+oe_admin_user: admin
+
+# Leave commented to auto-generate.
 # oe_admin_password: ""
 
-# -----------------------------------------------------------------------------
-# Resource Limits
-# -----------------------------------------------------------------------------
+# ── Redis ─────────────────────────────────────────────────────────────────────
+redis_max_memory:        "256mb"
+redis_max_memory_policy: "allkeys-lru"
+
+# ── Resource limits ───────────────────────────────────────────────────────────
 mariadb_resources:
   limits:
-    memory: "1Gi"
-    cpu: "500m"
+    memory: 1Gi
+    cpu: 500m
   requests:
-    memory: "512Mi"
-    cpu: "200m"
+    memory: 512Mi
+    cpu: 200m
 
 redis_resources:
   limits:
-    memory: "256Mi"
-    cpu: "250m"
+    memory: 256Mi
+    cpu: 250m
   requests:
-    memory: "64Mi"
-    cpu: "50m"
+    memory: 64Mi
+    cpu: 50m
 
 openemr_resources:
   limits:
-    memory: "768Mi"
-    cpu: "500m"
+    memory: 768Mi
+    cpu: 500m
   requests:
-    memory: "384Mi"
-    cpu: "200m"
+    memory: 384Mi
+    cpu: 200m
 
-# -----------------------------------------------------------------------------
-# Redis Tuning
-# -----------------------------------------------------------------------------
-redis_max_memory: "256mb"
-redis_max_memory_policy: "allkeys-lru"
-
-# -----------------------------------------------------------------------------
-# Wait Timeouts (seconds)
-# -----------------------------------------------------------------------------
+# ── Wait timeouts (seconds) ───────────────────────────────────────────────────
 mariadb_wait_timeout: 300
-redis_wait_timeout: 300
+redis_wait_timeout:   300
 openemr_wait_timeout: 300
 
-# -----------------------------------------------------------------------------
-# Output Paths
-# -----------------------------------------------------------------------------
-manifests_dir: "./openemr-manifests"
+# ── Output paths ──────────────────────────────────────────────────────────────
+manifests_dir:    "./openemr-manifests"
 credentials_file: "./openemr-credentials.txt"

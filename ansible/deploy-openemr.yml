@@ -57,6 +57,33 @@
       ansible.builtin.debug:
         msg: "Target namespace: {{ openshift_namespace }}"
 
+    - name: Auto-detect default StorageClass when storage_class is not set
+      when: storage_class == ""
+      block:
+        - name: Get all StorageClasses from cluster
+          kubernetes.core.k8s_info:
+            kind: StorageClass
+          register: all_storage_classes
+
+        - name: Set storage_class from cluster default annotation
+          ansible.builtin.set_fact:
+            storage_class: "{{ item.metadata.name }}"
+          loop: "{{ all_storage_classes.resources }}"
+          when: >
+            item.metadata.annotations is defined and
+            item.metadata.annotations['storageclass.kubernetes.io/is-default-class'] | default('false') == 'true'
+
+        - name: Fail if no default StorageClass found
+          ansible.builtin.fail:
+            msg: >
+              No default StorageClass found and storage_class is not set.
+              Set it explicitly: ansible-playbook deploy-openemr.yml -e "storage_class=lvms-vg1"
+          when: storage_class == ""
+
+    - name: Display resolved storage class
+      ansible.builtin.debug:
+        msg: "Storage class: {{ storage_class }}"
+
   # ---------------------------------------------------------------------------
   # TASKS
   # ---------------------------------------------------------------------------
@@ -270,6 +297,8 @@
                   app.kubernetes.io/managed-by: ansible
               spec:
                 replicas: 1
+                strategy:
+                  type: Recreate
                 selector:
                   matchLabels:
                     app: mariadb
@@ -319,11 +348,8 @@
                           initialDelaySeconds: 30
                           periodSeconds: 10
                         readinessProbe:
-                          exec:
-                            command:
-                              - /bin/sh
-                              - -c
-                              - mysqladmin ping -h localhost
+                          tcpSocket:
+                            port: 3306
                           initialDelaySeconds: 5
                           periodSeconds: 10
                         resources: "{{ mariadb_resources }}"

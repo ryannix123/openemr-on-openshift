@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: openemr
+    app.kubernetes.io/component: application
+    app.kubernetes.io/name: openemr
+    app.kubernetes.io/part-of: openemr
+    app.kubernetes.io/runtime: php
+  name: openemr
+  namespace: openemr
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: openemr
+  type: ClusterIP

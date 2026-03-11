@@ -1,0 +1,41 @@
+---
+# IstioCNI — installs the Istio CNI plugin on every node.
+# In ambient mode, this handles traffic interception at the Linux network
+# namespace level, redirecting pod traffic into the ztunnel HBONE tunnel.
+#
+# API version: sailoperator.io/v1 (promoted from v1alpha1 in Sail Operator 3.2+)
+apiVersion: sailoperator.io/v1
+kind: IstioCNI
+metadata:
+  name: default
+spec:
+  version: v1.27-latest
+  namespace: istio-cni
+  profile: ambient
+  values:
+    cni:
+      ambient:
+        enabled: true
+
+---
+# ZTunnel — manages the ztunnel DaemonSet for ambient mode.
+# In Sail Operator 3.2+, ztunnel is a first-class resource separate from
+# IstioCNI. Using sailoperator.io/v1alpha1 for ZTunnel is deprecated.
+#
+# ztunnel runs on every node and provides:
+#   - L4 mTLS (HBONE protocol) for all enrolled pods automatically
+#   - L4 AuthorizationPolicy enforcement (source identity, port)
+#   - Zero pod configuration — pods are unaware of the tunnel
+#
+# API version: sailoperator.io/v1
+apiVersion: sailoperator.io/v1
+kind: ZTunnel
+metadata:
+  name: default
+spec:
+  version: v1.27-latest
+  namespace: istio-system
+  values:
+    global:
+      # OpenShift requires privileged SCC for ztunnel node-level operations
+      platform: openshift

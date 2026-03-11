@@ -1,4 +1,4 @@
-# OpenEMR on OpenShift Developer Sandbox
+# OpenEMR on OpenShift
 
 [![OpenEMR Version](https://img.shields.io/badge/OpenEMR-8.0.0-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE0IDJINmEyIDIgMCAwIDAtMiAydjE2YTIgMiAwIDAgMCAyIDJoMTJhMiAyIDIgMCAwIDAtMlY4eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE0IDIgMTQgOCAyMCA4Ij48L3BvbHlsaW5lPjxsaW5lIHgxPSIxNiIgeTE9IjEzIiB4Mj0iOCIgeTI9IjEzIj48L2xpbmU+PGxpbmUgeDE9IjE2IiB5MT0iMTciIHgyPSI4IiB5Mj0iMTciPjwvbGluZT48cG9seWxpbmUgcG9pbnRzPSIxMCA5IDkgOSA4IDkiPjwvcG9seWxpbmU+PC9zdmc+)](https://www.open-emr.org/)
 [![PHP Version](https://img.shields.io/badge/PHP-8.5-777BB4?style=flat-square&logo=php&logoColor=white)](https://www.php.net/)
@@ -10,11 +10,11 @@
 [![ONC Certified](https://img.shields.io/badge/ONC-Certified-success?style=flat-square&logo=check-circle&logoColor=white)](https://chpl.healthit.gov/#/listing/10938)
 [![Build and Push OpenEMR](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml/badge.svg)](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml)
 
-Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift Developer Sandbox using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository.
+Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository. Compatible with Developer Sandbox, Single Node OpenShift (SNO), and full OpenShift clusters.
 
 ## Overview
 
-This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift Developer Sandbox.
+This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift. The deploy script auto-detects the cluster's default storage class, so the same script works on Developer Sandbox (AWS EBS), Single Node OpenShift with LVM Storage, ODF-backed clusters, and any other OpenShift environment without modification.
 
 ### 🚀 Technology Stack
 
@@ -33,14 +33,14 @@ This project provides a complete containerized deployment of OpenEMR (Open-sourc
 - **Custom OpenEMR Container**: Built on CentOS 10 Stream with Remi's PHP 8.5
 - **Redis Session Storage**: Redis 8 Alpine for improved performance and scalability
 - **MariaDB 11.8**: Latest Fedora MariaDB for robust database backend
-- **Developer Sandbox Ready**: Optimized for Developer Sandbox storage and resource constraints
+- **Platform Agnostic**: Auto-detects the cluster default storage class — works on Developer Sandbox, SNO, ODF, and full clusters without modification
 - **OpenShift Native**: Designed for OpenShift SCCs and security constraints
 - **Production Ready**: Includes health checks, resource limits, and monitoring
 - **HIPAA Considerations**: Encrypted transport, audit logging capabilities
 - **Auto-Configuration**: Zero-touch deployment with automated setup
 - **US Core 8.0 / USCDI v5**: Latest FHIR interoperability standards
 
-**Note**: This deployment is configured for OpenShift Developer Sandbox which uses AWS EBS storage (ReadWriteOnce only). OpenEMR runs as a single replica, suitable for development, demo, and small practice environments.
+**Note**: OpenEMR runs as a single replica because it uses ReadWriteOnce (RWO) persistent storage. This is suitable for development, demo, and small practice environments. For high availability, use a storage class that supports ReadWriteMany (RWX), such as ODF CephFS, and scale to multiple replicas.
 
 ## Why OpenEMR?
 
@@ -101,12 +101,11 @@ Whether you're a solo practitioner, a community health center, or a large health
         └─────────────────┘
 ```
 
-**Developer Sandbox Constraints:**
-- AWS EBS storage (gp3) provides ReadWriteOnce (RWO) volumes only
-- Single OpenEMR replica due to RWO storage limitation
-- Resource quotas: ~768Mi RAM and ~500m CPU per container
+**Storage Notes:**
+- The deploy script auto-detects the cluster default storage class (e.g. `lvms-vg1` on SNO, `gp3-csi` on Developer Sandbox, `ocs-storagecluster-ceph-rbd` on ODF)
+- Override with: `STORAGE_CLASS=my-class ./deploy-openemr.sh`
+- Single OpenEMR replica due to ReadWriteOnce (RWO) storage — scale with RWX storage if needed
 - Total storage: 16Gi (5Gi database + 10Gi documents + 1Gi Redis)
-- Redis 8 Alpine for PHP session storage
 
 ## Components
 
@@ -146,17 +145,19 @@ Whether you're a solo practitioner, a community health center, or a large health
 
 ## Prerequisites
 
-- Red Hat OpenShift Developer Sandbox account ([Get free access](https://developers.redhat.com/developer-sandbox))
+- Red Hat OpenShift cluster — any of:
+  - [Developer Sandbox](https://developers.redhat.com/developer-sandbox) (free, no cluster-admin required)
+  - Single Node OpenShift (SNO)
+  - Full OpenShift cluster
 - `oc` CLI tool installed and configured
 - Access to Quay.io for pulling container images (or build your own)
 - Basic understanding of Kubernetes/OpenShift concepts
 
-**Developer Sandbox Limitations to be aware of:**
+**Developer Sandbox specific limitations:**
 - Projects expire after 30 days of inactivity
 - Storage limited to ~40GB total per namespace
 - Resource quotas: Limited CPU/memory per namespace
-- No cluster-admin access
-- Single replica deployments recommended for persistent storage
+- No cluster-admin access (Service Mesh sub-project not supported)
 
 ## Quick Start
 
@@ -184,12 +185,16 @@ Or use the pre-built image: `quay.io/ryan_nix/openemr-openshift:latest`
 
 ### 3. Configure the Deployment (Optional)
 
-The script is pre-configured for Developer Sandbox with sensible defaults:
-- Storage: `gp3` (default Developer Sandbox storage class)
-- Database: 5Gi
-- Documents: 10Gi
+The script auto-detects the cluster's default storage class and works without any configuration changes. To override the storage class:
 
-You can optionally adjust these in `deploy-openemr.sh` if needed, but defaults work well for most cases.
+```bash
+export STORAGE_CLASS=lvms-vg1   # SNO with LVM Storage
+# or
+export STORAGE_CLASS=ocs-storagecluster-ceph-rbd   # ODF
+# or just run without setting it — the default is auto-detected
+```
+
+Storage sizes can be adjusted by editing the variables at the top of `deploy-openemr.sh` if needed.
 
 ### 4. Login to OpenShift Developer Sandbox
 
@@ -222,23 +227,30 @@ The script will:
 
 ### Storage Classes
 
-The deployment uses **AWS EBS gp3** storage (default in Developer Sandbox):
+The deploy script auto-detects the cluster's default storage class at runtime. No configuration is needed for standard environments:
 
-- **Access Mode**: ReadWriteOnce (RWO) only
-- **Storage Class**: `gp3` (default)
-- **Available**: gp2, gp2-csi, gp3, gp3-csi (all RWO)
-- **Not Available**: ReadWriteMany (RWX) storage
+| Environment | Typical Default Storage Class | Access Mode |
+|---|---|---|
+| Developer Sandbox | `gp3-csi` | RWO |
+| SNO with LVM Storage | `lvms-vg1` | RWO |
+| ODF (full cluster) | `ocs-storagecluster-ceph-rbd` | RWO / RWX |
 
-**Note**: Due to RWO storage limitations, OpenEMR runs as a single replica. This is suitable for development, testing, and small practice environments.
+To override the auto-detected class:
+```bash
+STORAGE_CLASS=my-storage-class ./deploy-openemr.sh
+```
+
+OpenEMR runs as a single replica with RWO storage, suitable for development, testing, and small practice environments.
 
 ### Scaling
 
-**Important**: Scaling to multiple replicas is not supported with RWO storage. If you need high availability:
+**Important**: Scaling to multiple replicas requires ReadWriteMany (RWX) storage. With the default RWO storage class, OpenEMR runs as a single replica.
 
-1. Deploy on a full OpenShift cluster with RWX storage (e.g., ODF CephFS)
-2. Update storage class to RWX-capable storage
-3. Change `ReadWriteOnce` to `ReadWriteMany` in documents PVC
-4. Then scale: `oc scale deployment/openemr --replicas=3 -n openemr`
+To scale:
+1. Use an RWX-capable storage class (e.g., ODF CephFS: `ocs-storagecluster-cephfs`)
+2. Redeploy with: `STORAGE_CLASS=ocs-storagecluster-cephfs ./deploy-openemr.sh`
+3. Change `ReadWriteOnce` to `ReadWriteMany` in the documents PVC
+4. Then scale: `oc scale deployment/openemr --replicas=3`
 
 ### Resource Limits
 
@@ -377,8 +389,8 @@ For production healthcare deployments:
 
 1. **Enable Encryption at Rest**:
    ```bash
-   # Use encrypted storage classes
-   STORAGE_CLASS="ocs-storagecluster-ceph-rbd-encrypted"
+   # Use an encrypted storage class (ODF example)
+   STORAGE_CLASS=ocs-storagecluster-ceph-rbd-encrypted ./deploy-openemr.sh
    ```
 
 2. **Implement Network Policies**:
@@ -535,4 +547,4 @@ This project follows OpenEMR's licensing. OpenEMR is licensed under GPL v3.
 
 ---
 
-**Note**: This is designed for healthcare environments. Ensure compliance with HIPAA, HITECH, and other applicable regulations in your jurisdiction before deploying with real patient data.
+**Note**: This is designed for healthcare environments. Ensure compliance with HIPAA, HITECH, and other applicable regulations in your jurisdiction before deploying with real patient data. Test thoroughly in a non-production environment before any clinical use.

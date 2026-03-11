@@ -4,7 +4,7 @@
 apiVersion: k8s.ovn.org/v1
 kind: EgressFirewall
 metadata:
-  name: openemr-egress
+  name: default
   namespace: openemr
 spec:
   egress:
