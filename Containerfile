@@ -1,31 +1,29 @@
-# OpenEMR Container - CentOS 10 Stream with Remi PHP 8.5
+# OpenEMR Container - CentOS 9 Stream with Remi PHP 8.4
 # Multi-stage build for optimized final image
 # Runs nginx + PHP-FPM in single container with supervisord
 
 # ============================================================================
 # Stage 1: Builder - Download and prepare OpenEMR
 # ============================================================================
-FROM quay.io/centos/centos:stream10 AS builder
+FROM quay.io/centos/centos:stream9 AS builder
 
-# OpenEMR version
-ARG OPENEMR_VERSION=8.0.0
+# OpenEMR version — single source of truth for the entire build.
+# Override at build time:  --build-arg OPENEMR_VERSION=8.0.0.1
+ARG OPENEMR_VERSION=8.0.0.1
 
 # Enable EPEL and CRB repositories for additional packages
-# Note: CentOS Stream 10 has GPG key crypto-policy issues, using --nogpgcheck for epel-release
-RUN dnf install -y --nogpgcheck epel-release \
-    && dnf install -y dnf-plugins-core \
+RUN dnf install -y epel-release \
     && dnf config-manager --set-enabled crb \
     && dnf clean all
 
-# Install Remi's repository for PHP 8.5
-# Note: Using --nogpgcheck due to CentOS Stream 10 crypto-policy compatibility
-RUN dnf install -y --nogpgcheck \
-    https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
+# Install Remi's repository for PHP 8.4
+RUN dnf install -y \
+    https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
     && dnf clean all
 
-# Enable Remi's PHP 8.5 repository
+# Enable Remi's PHP 8.4 repository
 RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.5 -y
+    && dnf module enable php:remi-8.4 -y
 
 # Install build dependencies and tools
 RUN dnf install -y \
@@ -41,15 +39,26 @@ RUN dnf install -y \
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-# Clone OpenEMR from GitHub (shallow clone of specific tag)
+# Clone OpenEMR from GitHub (shallow clone of the version tag)
+# Tag format: dots → underscores, prefixed with 'v'  (e.g. 8.0.0.1 → v8_0_0_1)
 WORKDIR /tmp
-RUN git clone https://github.com/openemr/openemr.git --branch v8_0_0 --depth 1
+RUN GIT_TAG="v$(echo ${OPENEMR_VERSION} | tr '.' '_')" \
+    && echo "Cloning OpenEMR tag: ${GIT_TAG}" \
+    && git clone https://github.com/openemr/openemr.git --branch "${GIT_TAG}" --depth 1
+
+# InstallerAuto.php is included in OpenEMR source at contrib/util/installScripts/
+# It supports no_root_db_access mode which works with pre-created databases
 
 # Install PHP dependencies with Composer
 WORKDIR /tmp/openemr
 RUN composer install --no-dev --no-interaction --optimize-autoloader
 
+# Note: npm build skipped - OpenEMR handles frontend build on first run
+# This matches official OpenEMR Docker behavior and avoids build crashes
+
 # Remove unnecessary files to reduce image size
+# Keep composer vendor/ directory - it's required
+# Skip npm build - OpenEMR will build assets on first run
 RUN cd /tmp/openemr && \
     rm -rf .git .github .travis* tests docker contrib/util/docker \
     && find . -type f -name "*.md" -delete \
@@ -64,47 +73,47 @@ RUN test -f /tmp/openemr/contrib/util/installScripts/InstallerAuto.php \
 # ============================================================================
 # Stage 2: Runtime - Build final container
 # ============================================================================
-FROM quay.io/centos/centos:stream10
+FROM quay.io/centos/centos:stream9
 
-LABEL maintainer="Ryan Nix <ryan_nix>" \
-      description="OpenEMR on CentOS 10 Stream - OpenShift Ready" \
-      version="8.0.0" \
+# Re-declare ARG so it's available in this stage
+ARG OPENEMR_VERSION=8.0.0.1
+
+LABEL maintainer="Ryan Nix <ryan.nix@gmail.com>" \
+      description="OpenEMR on CentOS 9 Stream - OpenShift Ready" \
+      version="${OPENEMR_VERSION}" \
       io.k8s.description="OpenEMR Electronic Medical Records System" \
       io.openshift.tags="openemr,healthcare,php,medical" \
       io.openshift.expose-services="8080:http" \
       app.openshift.io/runtime=php
 
 # Environment variables
-ENV OPENEMR_VERSION=8.0.0 \
+ENV OPENEMR_VERSION=${OPENEMR_VERSION} \
     OPENEMR_WEB_ROOT=/var/www/html/openemr \
     PHP_FPM_PORT=9000 \
     NGINX_PORT=8080 \
-    PHP_VERSION=8.5
+    PHP_VERSION=8.4
 
 # Enable EPEL and CRB repositories
-# Note: CentOS Stream 10 has GPG key crypto-policy issues, using --nogpgcheck for epel-release
-RUN dnf install -y --nogpgcheck epel-release \
-    && dnf install -y dnf-plugins-core \
+RUN dnf install -y epel-release \
     && dnf config-manager --set-enabled crb \
     && dnf clean all
 
 # Update all packages to get security patches
 RUN dnf upgrade -y && dnf clean all
 
-# Install Remi's repository for PHP 8.5
-# Note: Using --nogpgcheck due to CentOS Stream 10 crypto-policy compatibility
-RUN dnf install -y --nogpgcheck \
-    https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
+# Install Remi's repository for PHP 8.4
+RUN dnf install -y \
+    https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
     && dnf clean all
 
-# Enable Remi's PHP 8.5 repository and reset PHP module
+# Enable Remi's PHP 8.4 repository and reset PHP module
 RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.5 -y
+    && dnf module enable php:remi-8.4 -y
 
 # Install nginx
 RUN dnf install -y nginx && dnf clean all
 
-# Install PHP 8.5 and all required modules for OpenEMR from Remi's repo
+# Install PHP 8.4 and all required modules for OpenEMR from Remi's repo
 RUN dnf install -y \
     # PHP Core
     php \
@@ -138,13 +147,12 @@ RUN dnf install -y \
     # Utilities
     unzip \
     wget \
-    which \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# Install Node.js 22 (required for OpenEMR frontend build)
-# Note: CentOS Stream 10 uses direct package installation, not module streams
-RUN dnf install -y nodejs22 npm \
+# Install Node.js 20 (required for OpenEMR frontend build)
+RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - \
+    && dnf install -y nodejs \
     && dnf clean all \
     && node --version && npm --version
 
@@ -162,40 +170,24 @@ RUN npm install --legacy-peer-deps \
     && rm -rf node_modules \
     && echo "✓ Frontend assets built successfully"
 
-# Install CCDA/CQM service dependencies (Node.js microservices for
-# C-CDA document exchange and Clinical Quality Measures reporting)
-# These run as a supervised process alongside nginx and PHP-FPM
-RUN cd ${OPENEMR_WEB_ROOT}/ccdaservice \
-    && npm install --legacy-peer-deps \
-    && echo "✓ CCDA/CQM service dependencies installed"
-
-# Fix relative path resolution for nginx + PHP-FPM
-# Apache mod_php auto-sets CWD to the script's directory on each request;
-# PHP-FPM does not, which breaks OpenEMR's relative require paths (e.g., ../globals.php).
-# This prepend script restores that behavior.
-RUN cat > ${OPENEMR_WEB_ROOT}/auto_prepend.php <<'EOF'
-<?php
-chdir(dirname($_SERVER['SCRIPT_FILENAME']));
-EOF
-
 # ============================================================================
 # PHP Configuration
 # ============================================================================
 
 # Create custom PHP configuration for OpenEMR
 RUN cat > /etc/php.d/99-openemr.ini <<'EOF'
-; OpenEMR PHP Configuration
-; File Upload Settings (for medical documents, images, lab results)
+# OpenEMR PHP Configuration
+# File Upload Settings (for medical documents, images, lab results)
 upload_max_filesize = 128M
 post_max_size = 128M
 max_input_vars = 3000
 
-; Memory and Execution
+# Memory and Execution
 memory_limit = 512M
 max_execution_time = 300
 max_input_time = 300
 
-; Session Configuration (Redis-backed for multi-pod deployments)
+# Session Configuration (Redis-backed for multi-pod deployments)
 session.save_handler = redis
 session.save_path = "tcp://redis:6379"
 session.gc_maxlifetime = 7200
@@ -203,27 +195,22 @@ session.cookie_httponly = 1
 session.cookie_secure = 1
 session.use_strict_mode = 1
 
-; Error Handling (Production)
+# Error Handling (Production)
 display_errors = Off
 display_startup_errors = Off
 error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
 log_errors = On
 error_log = /dev/stderr
 
-; Security
+# Security
 expose_php = Off
 allow_url_fopen = On
 allow_url_include = Off
 
-; Date/Time
+# Date/Time
 date.timezone = UTC
 
-; Working directory fix for nginx + PHP-FPM
-; OpenEMR uses relative paths (e.g., ../globals.php) that require
-; the CWD to match the script's directory, as Apache mod_php does
-auto_prepend_file = /var/www/html/openemr/auto_prepend.php
-
-; OPcache (Performance)
+# OPcache (Performance)
 opcache.enable = 1
 opcache.memory_consumption = 256
 opcache.interned_strings_buffer = 16
@@ -345,11 +332,6 @@ http {
             include fastcgi_params;
         }
 
-        # OpenEMR Zend Module routes (Manage Modules, Carecoordination, etc.)
-        location /interface/modules/zend_modules {
-            try_files $uri $uri/ /interface/modules/zend_modules/public/index.php?$query_string;
-        }
-
         # OpenEMR main application
         location / {
             try_files $uri $uri/ /index.php?$query_string;
@@ -395,7 +377,7 @@ http {
 EOF
 
 # ============================================================================
-# Supervisor Configuration (manages nginx + PHP-FPM + CCDA/CQM service)
+# Supervisor Configuration (manages nginx + PHP-FPM)
 # ============================================================================
 
 RUN mkdir -p /var/log/supervisor
@@ -425,36 +407,6 @@ command=/usr/sbin/nginx -g 'daemon off;'
 autostart=true
 autorestart=true
 priority=10
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-stdout_events_enabled=true
-stderr_events_enabled=true
-
-[program:ccda-service]
-command=node /var/www/html/openemr/ccdaservice/serveccda.js
-directory=/var/www/html/openemr/ccdaservice
-autostart=true
-autorestart=true
-priority=15
-startsecs=5
-startretries=3
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-stdout_events_enabled=true
-stderr_events_enabled=true
-
-[program:cqm-service]
-command=node /var/www/html/openemr/ccdaservice/node_modules/oe-cqm-service/server.js
-directory=/var/www/html/openemr/ccdaservice/node_modules/oe-cqm-service
-autostart=true
-autorestart=true
-priority=15
-startsecs=5
-startretries=3
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -508,13 +460,6 @@ RUN chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents \
     && mkdir -p ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods \
     && chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc
 
-# Backup sites/default for PVC initialization
-# When a PVC is mounted at sites/default, it will be empty on first run
-# The entrypoint will restore these files to initialize the PVC
-RUN cp -a ${OPENEMR_WEB_ROOT}/sites/default /opt/openemr-sites-default-backup \
-    && chgrp -R 0 /opt/openemr-sites-default-backup \
-    && chmod -R g=u /opt/openemr-sites-default-backup
-
 # Create entrypoint script
 RUN cat > /entrypoint.sh <<'ENTRYPOINT'
 #!/bin/bash
@@ -532,22 +477,6 @@ echo "  - PHP-FPM: 127.0.0.1:${PHP_FPM_PORT}"
 echo "  - nginx: 0.0.0.0:${NGINX_PORT}"
 echo "  - UID: $(id -u), GID: $(id -g)"
 echo "=========================================="
-
-# Initialize PVC if empty (first run with freshly mounted PVC)
-# Check if config.php exists - if not, PVC is empty and needs initialization
-# We check config.php (not sqlconf.php) because config.php is static and only exists after restore
-echo "Checking if site files need to be restored..."
-if [ ! -f "${OPENEMR_WEB_ROOT}/sites/default/config.php" ]; then
-    echo "Site files missing - initializing from backup..."
-    if [ -d "/opt/openemr-sites-default-backup" ]; then
-        cp -a /opt/openemr-sites-default-backup/* ${OPENEMR_WEB_ROOT}/sites/default/
-        echo "✓ Site files restored from backup"
-    else
-        echo "⚠ No backup found at /opt/openemr-sites-default-backup"
-    fi
-else
-    echo "✓ Site files already present"
-fi
 
 # Ensure permissions are correct (OpenShift may assign random UID)
 echo "Setting permissions for UID $(id -u)..."
@@ -579,91 +508,6 @@ echo "Checking configuration status..."
 echo "  - sqlconf.php exists: $(test -f "$SQLCONF" && echo 'yes' || echo 'no')"
 echo "  - InstallerAuto.php exists: $(test -f "$INSTALLER" && echo 'yes' || echo 'no')"
 
-# Set database credentials from environment (with defaults)
-export MYSQL_HOST=${MYSQL_HOST:-mariadb}
-export MYSQL_PORT=${MYSQL_PORT:-3306}
-export MYSQL_DATABASE=${MYSQL_DATABASE:-openemr}
-export MYSQL_USER=${MYSQL_USER:-openemr}
-export MYSQL_PASS=${MYSQL_PASS:-openemr}
-export OE_USER=${OE_USER:-admin}
-export OE_PASS=${OE_PASS:-pass}
-
-# ─── Helper: Write real credentials into sqlconf.php ───
-# This ensures sqlconf.php always has the correct credentials from the
-# environment, regardless of whether InstallerAuto.php succeeds or fails.
-update_sqlconf_credentials() {
-    if [ -f "$SQLCONF" ]; then
-        echo "Syncing sqlconf.php with environment credentials..."
-        sed -i "s|\\\$host[[:space:]]*=.*|\\\$host   = '${MYSQL_HOST}';|" "$SQLCONF"
-        sed -i "s|\\\$port[[:space:]]*=.*|\\\$port   = '${MYSQL_PORT}';|" "$SQLCONF"
-        sed -i "s|\\\$login[[:space:]]*=.*|\\\$login  = '${MYSQL_USER}';|" "$SQLCONF"
-        sed -i "s|\\\$pass[[:space:]]*=.*|\\\$pass   = '${MYSQL_PASS}';|" "$SQLCONF"
-        sed -i "s|\\\$dbase[[:space:]]*=.*|\\\$dbase  = '${MYSQL_DATABASE}';|" "$SQLCONF"
-        echo "✓ sqlconf.php credentials updated"
-    fi
-}
-
-# ─── Helper: Check if database has OpenEMR tables ───
-db_has_tables() {
-    php -r "
-        \$c = @mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}');
-        if (!\$c) exit(1);
-        \$r = mysqli_query(\$c, \"SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}'\");
-        \$row = mysqli_fetch_assoc(\$r);
-        exit(\$row['cnt'] > 10 ? 0 : 1);
-    " 2>/dev/null
-}
-
-# ─── Helper: Check if install is COMPLETE (not just tables created) ───
-# The installer creates tables first, then seeds globals/data. If the pod
-# restarts mid-install, tables exist but globals is empty = broken state.
-db_install_complete() {
-    php -r "
-        \$c = @mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}');
-        if (!\$c) exit(1);
-        \$r = mysqli_query(\$c, \"SELECT COUNT(*) as cnt FROM globals\");
-        if (!\$r) exit(1);
-        \$row = mysqli_fetch_assoc(\$r);
-        // A complete install has 300+ globals rows; partial has 0-5
-        exit(\$row['cnt'] > 100 ? 0 : 1);
-    " 2>/dev/null
-}
-
-# ─── Helper: Drop all tables for clean re-install ───
-# Used when a partial install left tables but no seed data
-db_drop_all_tables() {
-    echo "Dropping all tables from incomplete install..."
-    php -r "
-        \$c = @mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}');
-        if (!\$c) { echo 'Could not connect to drop tables' . PHP_EOL; exit(1); }
-        mysqli_query(\$c, 'SET FOREIGN_KEY_CHECKS = 0');
-        \$r = mysqli_query(\$c, \"SELECT table_name FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}'\");
-        \$count = 0;
-        while (\$row = mysqli_fetch_assoc(\$r)) {
-            mysqli_query(\$c, 'DROP TABLE IF EXISTS \`' . \$row['table_name'] . '\`');
-            \$count++;
-        }
-        mysqli_query(\$c, 'SET FOREIGN_KEY_CHECKS = 1');
-        echo \"Dropped \$count tables\" . PHP_EOL;
-    " 2>/dev/null
-}
-
-# ─── Helper: Enable C-CDA/CQM connector ───
-enable_ccda_connector() {
-    echo "Enabling C-CDA service connector..."
-    php -r "
-        require '${OPENEMR_WEB_ROOT}/sites/default/sqlconf.php';
-        \$conn = mysqli_connect(\$host, \$login, \$pass, \$dbase, (int)\$port);
-        if (\$conn) {
-            mysqli_query(\$conn, \"INSERT INTO globals (gl_name, gl_index, gl_value) VALUES ('ccda_alt_service_enable', 0, '3') ON DUPLICATE KEY UPDATE gl_value='3'\");
-            echo '✓ C-CDA service connector enabled' . PHP_EOL;
-            mysqli_close(\$conn);
-        } else {
-            echo '⚠ Could not enable C-CDA connector: ' . mysqli_connect_error() . PHP_EOL;
-        }
-    " 2>&1 || echo "⚠ C-CDA connector setup had issues"
-}
-
 # Check if already configured ($config = 1 means configured)
 ALREADY_CONFIGURED=false
 if [ -f "$SQLCONF" ] && grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
@@ -673,25 +517,20 @@ else
     echo "  - Configuration status: NOT CONFIGURED"
 fi
 
-# ─── Case 1: Already configured — sync credentials if needed ───
-if [ "$ALREADY_CONFIGURED" = true ]; then
-    echo "✓ OpenEMR already configured"
-    
-    # Sync credentials in case PVC outlived the secret (redeployment with new password)
-    update_sqlconf_credentials
-    
-    # Verify we can actually connect with these credentials
-    if php -r "mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', (int)'${MYSQL_PORT}') or exit(1);" 2>/dev/null; then
-        echo "✓ Database connection verified"
-    else
-        echo "⚠ Database connection failed — MariaDB may still be starting"
-    fi
-
-# ─── Case 2: Not configured, installer available — run auto-config ───
-elif [ -f "$INSTALLER" ]; then
+# Auto-configuration on first run
+if [ "$ALREADY_CONFIGURED" = false ] && [ -f "$INSTALLER" ]; then
     echo "=========================================="
     echo "Running OpenEMR Auto-Configuration"
     echo "=========================================="
+    
+    # Set defaults if not provided
+    export MYSQL_HOST=${MYSQL_HOST:-mariadb}
+    export MYSQL_PORT=${MYSQL_PORT:-3306}
+    export MYSQL_DATABASE=${MYSQL_DATABASE:-openemr}
+    export MYSQL_USER=${MYSQL_USER:-openemr}
+    export MYSQL_PASS=${MYSQL_PASS:-openemr}
+    export OE_USER=${OE_USER:-admin}
+    export OE_PASS=${OE_PASS:-pass}
     
     echo "Database connection settings:"
     echo "  - Host: ${MYSQL_HOST}"
@@ -699,10 +538,6 @@ elif [ -f "$INSTALLER" ]; then
     echo "  - Database: ${MYSQL_DATABASE}"
     echo "  - User: ${MYSQL_USER}"
     echo "  - Admin User: ${OE_USER}"
-    
-    # Write real credentials into sqlconf.php BEFORE running installer
-    # This ensures the app can connect even if the installer fails partway through
-    update_sqlconf_credentials
     
     # Wait for database to be ready
     echo "Waiting for database at ${MYSQL_HOST}..."
@@ -722,98 +557,45 @@ elif [ -f "$INSTALLER" ]; then
     if [ $counter -le 30 ]; then
         echo "✓ Database connection successful"
         
-        # Check if this is a retry (tables already exist from a previous partial install)
-        if db_has_tables; then
-            if db_install_complete; then
-                echo "Database has complete OpenEMR install (previous run succeeded)"
-                echo "Skipping InstallerAuto.php — fixing configuration only..."
-                sed -i "s|\\\$config = 0.*|\\\$config = 1; ////////////|" "$SQLCONF"
-                echo "✓ Configuration status set to CONFIGURED"
-                enable_ccda_connector
-            else
-                echo "⚠ Incomplete install detected (tables exist but globals not seeded)"
-                echo "  Cleaning up and re-running installer..."
-                db_drop_all_tables
-                
-                # Reset sqlconf.php to unconfigured state for clean install
-                sed -i "s|\\\$config = 1.*|\\\$config = 0; ////////////|" "$SQLCONF"
-                
-                echo "Running InstallerAuto.php (no_root_db_access mode)..."
-                cd ${OPENEMR_WEB_ROOT}
-                export OPENEMR_ENABLE_INSTALLER_AUTO=1
-                
-                php -f contrib/util/installScripts/InstallerAuto.php \
-                    no_root_db_access=1 \
-                    server="${MYSQL_HOST}" \
-                    port="${MYSQL_PORT}" \
-                    login="${MYSQL_USER}" \
-                    pass="${MYSQL_PASS}" \
-                    dbname="${MYSQL_DATABASE}" \
-                    iuser="${OE_USER}" \
-                    iuserpass="${OE_PASS}" \
-                    iuname="Administrator" \
-                    2>&1 \
-                    && echo "✓ Auto-configuration completed successfully!" \
-                    || echo "⚠ Auto-configuration had issues, check logs above"
-                
-                # Ensure credentials are correct after installer
-                update_sqlconf_credentials
-                
-                if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
-                    echo "✓ OpenEMR configured and ready!"
-                    enable_ccda_connector
-                else
-                    echo "⚠ Configuration may not be complete - manual setup may be required"
-                fi
-            fi
+        # Run InstallerAuto.php with no_root_db_access mode
+        # This uses the pre-created database and user from MariaDB container
+        echo "Running InstallerAuto.php (no_root_db_access mode)..."
+        cd ${OPENEMR_WEB_ROOT}
+        
+        # Enable the installer script
+        export OPENEMR_ENABLE_INSTALLER_AUTO=1
+        
+        php -f contrib/util/installScripts/InstallerAuto.php \
+            no_root_db_access=1 \
+            server="${MYSQL_HOST}" \
+            port="${MYSQL_PORT}" \
+            login="${MYSQL_USER}" \
+            pass="${MYSQL_PASS}" \
+            dbname="${MYSQL_DATABASE}" \
+            iuser="${OE_USER}" \
+            iuserpass="${OE_PASS}" \
+            iuname="Administrator" \
+            2>&1 \
+            && echo "✓ Auto-configuration completed successfully!" \
+            || echo "⚠ Auto-configuration had issues, check logs above"
+        
+        # Verify configuration was successful
+        if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
+            echo "✓ OpenEMR configured and ready!"
         else
-            # Fresh install — run InstallerAuto.php
-            echo "Running InstallerAuto.php (no_root_db_access mode)..."
-            cd ${OPENEMR_WEB_ROOT}
-            
-            export OPENEMR_ENABLE_INSTALLER_AUTO=1
-            
-            php -f contrib/util/installScripts/InstallerAuto.php \
-                no_root_db_access=1 \
-                server="${MYSQL_HOST}" \
-                port="${MYSQL_PORT}" \
-                login="${MYSQL_USER}" \
-                pass="${MYSQL_PASS}" \
-                dbname="${MYSQL_DATABASE}" \
-                iuser="${OE_USER}" \
-                iuserpass="${OE_PASS}" \
-                iuname="Administrator" \
-                2>&1 \
-                && echo "✓ Auto-configuration completed successfully!" \
-                || echo "⚠ Auto-configuration had issues, check logs above"
-            
-            # Verify and recover
-            if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
-                echo "✓ OpenEMR configured and ready!"
-                enable_ccda_connector
-            elif db_has_tables && db_install_complete; then
-                # Installer created tables and seeded data but didn't update sqlconf.php
-                echo "⚠ Installer didn't update sqlconf.php — recovering..."
-                update_sqlconf_credentials
-                sed -i "s|\\\$config = 0.*|\\\$config = 1; ////////////|" "$SQLCONF"
-                echo "✓ Configuration recovered"
-                enable_ccda_connector
-            else
-                echo "⚠ Configuration may not be complete - manual setup may be required"
-                echo "  Visit the web interface to complete setup"
-            fi
+            echo "⚠ Configuration may not be complete - manual setup may be required"
         fi
         
         echo "=========================================="
     fi
-
-# ─── Case 3: No installer available ───
+elif [ "$ALREADY_CONFIGURED" = true ]; then
+    echo "✓ OpenEMR already configured, skipping auto-configuration"
 else
     echo "⚠ InstallerAuto.php not found - manual setup required"
     echo "  Visit the web interface to complete setup"
 fi
 
-# Start supervisor (manages nginx + PHP-FPM + CCDA/CQM service)
+# Start supervisor (manages nginx + PHP-FPM)
 echo "Starting services via supervisord..."
 exec /usr/bin/supervisord -c /etc/supervisord.conf
 ENTRYPOINT
@@ -828,7 +610,7 @@ RUN chmod +x /entrypoint.sh && chgrp 0 /entrypoint.sh && chmod g=u /entrypoint.s
 EXPOSE 8080
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Switch to non-root user (OpenShift will override with arbitrary UID)
