@@ -1,4 +1,4 @@
-# OpenEMR Container - CentOS 9 Stream with Remi PHP 8.4
+# OpenEMR Container - CentOS 9 Stream with Remi PHP 8.5
 # Multi-stage build for optimized final image
 # Runs nginx + PHP-FPM in single container with supervisord
 
@@ -16,14 +16,14 @@ RUN dnf install -y epel-release \
     && dnf config-manager --set-enabled crb \
     && dnf clean all
 
-# Install Remi's repository for PHP 8.4
+# Install Remi's repository for PHP 8.5
 RUN dnf install -y \
     https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
     && dnf clean all
 
-# Enable Remi's PHP 8.4 repository
+# Enable Remi's PHP 8.5 repository
 RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.4 -y
+    && dnf module enable php:remi-8.5 -y
 
 # Install build dependencies and tools
 RUN dnf install -y \
@@ -91,7 +91,7 @@ ENV OPENEMR_VERSION=${OPENEMR_VERSION} \
     OPENEMR_WEB_ROOT=/var/www/html/openemr \
     PHP_FPM_PORT=9000 \
     NGINX_PORT=8080 \
-    PHP_VERSION=8.4
+    PHP_VERSION=8.5
 
 # Enable EPEL and CRB repositories
 RUN dnf install -y epel-release \
@@ -101,19 +101,19 @@ RUN dnf install -y epel-release \
 # Update all packages to get security patches
 RUN dnf upgrade -y && dnf clean all
 
-# Install Remi's repository for PHP 8.4
+# Install Remi's repository for PHP 8.5
 RUN dnf install -y \
     https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
     && dnf clean all
 
-# Enable Remi's PHP 8.4 repository and reset PHP module
+# Enable Remi's PHP 8.5 repository and reset PHP module
 RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.4 -y
+    && dnf module enable php:remi-8.5 -y
 
 # Install nginx
 RUN dnf install -y nginx && dnf clean all
 
-# Install PHP 8.4 and all required modules for OpenEMR from Remi's repo
+# Install PHP 8.5 and all required modules for OpenEMR from Remi's repo
 RUN dnf install -y \
     # PHP Core
     php \
@@ -170,6 +170,12 @@ RUN npm install --legacy-peer-deps \
     && rm -rf node_modules \
     && echo "✓ Frontend assets built successfully"
 
+# Preserve default site files for PVC-mounted deployments.
+# When a PVC is mounted at sites/default/, it overlays the image layer and
+# hides files like config.php.  The entrypoint restores any missing files
+# from this backup directory on first start.
+RUN cp -a ${OPENEMR_WEB_ROOT}/sites/default ${OPENEMR_WEB_ROOT}/sites/default.dist
+
 # ============================================================================
 # PHP Configuration
 # ============================================================================
@@ -177,7 +183,7 @@ RUN npm install --legacy-peer-deps \
 # Create custom PHP configuration for OpenEMR
 RUN cat > /etc/php.d/99-openemr.ini <<'EOF'
 ; OpenEMR PHP Configuration
-; PHP ini files require semicolons for comments (# was removed in PHP 8.x)
+; PHP ini files require semicolons for comments (# is rejected in PHP 8.x)
 
 ; File Upload Settings (for medical documents, images, lab results)
 upload_max_filesize = 128M
@@ -488,6 +494,21 @@ chmod -R g=u /var/lib/php/session 2>/dev/null || true
 # Create crypto keys directory (may be on mounted PVC, so create at runtime)
 mkdir -p ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods 2>/dev/null || true
 chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc 2>/dev/null || true
+
+# Restore default site files that are hidden by the PVC mount.
+# The PVC at sites/default/ starts empty, so files like config.php that
+# shipped with the image are invisible.  Copy them from the backup.
+if [ -d "${OPENEMR_WEB_ROOT}/sites/default.dist" ]; then
+    echo "Checking for missing default site files..."
+    cd ${OPENEMR_WEB_ROOT}/sites/default.dist
+    for f in *; do
+        if [ ! -e "${OPENEMR_WEB_ROOT}/sites/default/$f" ]; then
+            cp -a "$f" "${OPENEMR_WEB_ROOT}/sites/default/$f" 2>/dev/null \
+                && echo "  Restored: $f"
+        fi
+    done
+    cd ${OPENEMR_WEB_ROOT}
+fi
 
 # Test Redis connectivity and fall back to file sessions if needed
 echo "Testing session storage..."
