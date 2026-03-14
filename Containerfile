@@ -150,8 +150,8 @@ RUN dnf install -y \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-# Install Node.js 20 (required for OpenEMR frontend build)
-RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - \
+# Install Node.js 22 (required for OpenEMR 8.x frontend build)
+RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
     && dnf install -y nodejs \
     && dnf clean all \
     && node --version && npm --version
@@ -176,18 +176,20 @@ RUN npm install --legacy-peer-deps \
 
 # Create custom PHP configuration for OpenEMR
 RUN cat > /etc/php.d/99-openemr.ini <<'EOF'
-# OpenEMR PHP Configuration
-# File Upload Settings (for medical documents, images, lab results)
+; OpenEMR PHP Configuration
+; PHP ini files require semicolons for comments (# was removed in PHP 8.x)
+
+; File Upload Settings (for medical documents, images, lab results)
 upload_max_filesize = 128M
 post_max_size = 128M
 max_input_vars = 3000
 
-# Memory and Execution
+; Memory and Execution
 memory_limit = 512M
 max_execution_time = 300
 max_input_time = 300
 
-# Session Configuration (Redis-backed for multi-pod deployments)
+; Session Configuration (Redis-backed for multi-pod deployments)
 session.save_handler = redis
 session.save_path = "tcp://redis:6379"
 session.gc_maxlifetime = 7200
@@ -195,22 +197,22 @@ session.cookie_httponly = 1
 session.cookie_secure = 1
 session.use_strict_mode = 1
 
-# Error Handling (Production)
+; Error Handling (Production)
 display_errors = Off
 display_startup_errors = Off
 error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
 log_errors = On
 error_log = /dev/stderr
 
-# Security
+; Security
 expose_php = Off
 allow_url_fopen = On
 allow_url_include = Off
 
-# Date/Time
+; Date/Time
 date.timezone = UTC
 
-# OPcache (Performance)
+; OPcache (Performance)
 opcache.enable = 1
 opcache.memory_consumption = 256
 opcache.interned_strings_buffer = 16
@@ -218,7 +220,6 @@ opcache.max_accelerated_files = 10000
 opcache.validate_timestamps = 0
 opcache.revalidate_freq = 0
 opcache.save_comments = 1
-opcache.fast_shutdown = 1
 EOF
 
 # ============================================================================
@@ -497,6 +498,9 @@ else
     # Update PHP-FPM to use file sessions
     sed -i 's|php_value\[session.save_handler\] = redis|php_value\[session.save_handler\] = files|' /etc/php-fpm.d/www.conf
     sed -i 's|php_value\[session.save_path\].*|php_value\[session.save_path\] = "/var/lib/php/session"|' /etc/php-fpm.d/www.conf
+    # Also update the PHP ini so CLI scripts use file sessions too
+    sed -i 's|session.save_handler = redis|session.save_handler = files|' /etc/php.d/99-openemr.ini
+    sed -i 's|session.save_path = "tcp://redis:6379"|session.save_path = "/var/lib/php/session"|' /etc/php.d/99-openemr.ini
 fi
 
 # Check if OpenEMR is already configured (look for $config = 1 in sqlconf.php)
