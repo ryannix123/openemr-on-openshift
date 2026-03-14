@@ -32,15 +32,16 @@ on:
 
   # Auto-run weekly to pick up new patches and security updates
   schedule:
-  - cron: '0 6 * * 1' # Every Monday at 6am UTC
+    - cron: '0 6 * * 1'  # Every Monday at 6am UTC
+
   # Build on push to main when container-related files change
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
-    - 'Containerfile'
-    - 'configs/**'
-    - 'scripts/**'
-    - '.github/workflows/build-image.yml'
+      - 'Containerfile'
+      - 'configs/**'
+      - 'scripts/**'
+      - '.github/workflows/build-image.yml'
 
 env:
   REGISTRY: quay.io
@@ -54,164 +55,165 @@ jobs:
       packages: write
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Determine which OpenEMR version to build
-    #
-    # Priority:
-    #   1. Manual workflow_dispatch input (if provided)
-    #   2. Auto-detect latest stable release from GitHub tags
-    #      (scheduled runs + dispatch without version + push)
-    #   3. Fallback: extract version from Containerfile
-    # ─────────────────────────────────────────────────────────────────────────
-    - name: Determine OpenEMR version
-      id: version
-      run: |
-        # --- Option 1: Manual input ---
-        if [ -n "${{ inputs.openemr_version }}" ]; then
-          VERSION="${{ inputs.openemr_version }}"
-          echo "📌 Using manually specified version: ${VERSION}"
+      # ─────────────────────────────────────────────────────────────────────────
+      # Determine which OpenEMR version to build
+      #
+      # Priority:
+      #   1. Manual workflow_dispatch input (if provided)
+      #   2. Auto-detect latest stable release from GitHub tags
+      #      (scheduled runs + dispatch without version + push)
+      #   3. Fallback: extract version from Containerfile
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Determine OpenEMR version
+        id: version
+        run: |
+          # --- Option 1: Manual input ---
+          if [ -n "${{ inputs.openemr_version }}" ]; then
+            VERSION="${{ inputs.openemr_version }}"
+            echo "📌 Using manually specified version: ${VERSION}"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "### 📦 Build Version: ${VERSION} (manual)" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # --- Option 2: Auto-detect latest stable tag from upstream ---
+          echo "🔍 Querying OpenEMR GitHub tags for latest stable release..."
+          LATEST_TAG=$(curl -sf "https://api.github.com/repos/openemr/openemr/tags?per_page=100" \
+            | jq -r '.[].name' \
+            | grep -E '^v[0-9]+_[0-9]+_[0-9]+(_[0-9]+)?$' \
+            | sed 's/^v//; s/_/./g' \
+            | sort -V \
+            | tail -1)
+
+          if [ -n "$LATEST_TAG" ]; then
+            VERSION="${LATEST_TAG}"
+            echo "✅ Latest upstream release detected: ${VERSION}"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "### 📦 Build Version: ${VERSION} (auto-detected)" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # --- Option 3: Fallback to Containerfile ---
+          echo "⚠️  GitHub API query returned no results — falling back to Containerfile"
+          VERSION=$(grep -oP 'OPENEMR_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' Containerfile | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Could not determine version from any source"
+            exit 1
+          fi
+          echo "📄 Using version from Containerfile: ${VERSION}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "### 📦 Build Version: ${VERSION} (manual)" >> $GITHUB_STEP_SUMMARY
-          exit 0
-        fi
+          echo "### 📦 Build Version: ${VERSION} (Containerfile fallback)" >> $GITHUB_STEP_SUMMARY
 
-        # --- Option 2: Auto-detect latest stable tag from upstream ---
-        echo "🔍 Querying OpenEMR GitHub tags for latest stable release..."
-        LATEST_TAG=$(curl -sf "https://api.github.com/repos/openemr/openemr/tags?per_page=100" \
-          | jq -r '.[].name' \
-          | grep -E '^v[0-9]+_[0-9]+_[0-9]+(_[0-9]+)?$' \
-          | sed 's/^v//; s/_/./g' \
-          | sort -V \
-          | tail -1)
+      # ─────────────────────────────────────────────────────────────────────────
+      # Check if image already exists in registry (skip if force rebuild)
+      # Scheduled runs always force a rebuild to pick up base image updates.
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Check if image exists in registry
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FORCE="${{ inputs.force_rebuild }}"
 
-        if [ -n "$LATEST_TAG" ]; then
-          VERSION="${LATEST_TAG}"
-          echo "✅ Latest upstream release detected: ${VERSION}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "### 📦 Build Version: ${VERSION} (auto-detected)" >> $GITHUB_STEP_SUMMARY
-          exit 0
-        fi
+          if [ "$FORCE" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Force rebuild requested - skipping existence check"
+            echo "exists=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
-        # --- Option 3: Fallback to Containerfile ---
-        echo "⚠️  GitHub API query returned no results — falling back to Containerfile"
-        VERSION=$(grep -oP 'OPENEMR_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' Containerfile | head -1)
-        if [ -z "$VERSION" ]; then
-          echo "ERROR: Could not determine version from any source"
-          exit 1
-        fi
-        echo "📄 Using version from Containerfile: ${VERSION}"
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "### 📦 Build Version: ${VERSION} (Containerfile fallback)" >> $GITHUB_STEP_SUMMARY
+          # Check if tag exists using Quay.io API (no auth needed for public repos)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://quay.io/api/v1/repository/${{ env.IMAGE_NAME }}/tag/?specificTag=${VERSION}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Check if image already exists in registry (skip if force rebuild)
-    # ─────────────────────────────────────────────────────────────────────────
-    - name: Check if image exists in registry
-      id: check
-      run: |
-        VERSION="${{ steps.version.outputs.version }}"
-        FORCE="${{ inputs.force_rebuild }}"
+          if [ "$HTTP_CODE" = "200" ]; then
+            # Check if the specific tag actually exists in the response
+            TAG_EXISTS=$(curl -s "https://quay.io/api/v1/repository/${{ env.IMAGE_NAME }}/tag/?specificTag=${VERSION}" \
+              | grep -c "\"name\": \"${VERSION}\"" || true)
 
-        if [ "$FORCE" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
-          echo "Force rebuild requested - skipping existence check"
-          echo "exists=false" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-
-        # Check if tag exists using Quay.io API (no auth needed for public repos)
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-          "https://quay.io/api/v1/repository/${{ env.IMAGE_NAME }}/tag/?specificTag=${VERSION}")
-
-        if [ "$HTTP_CODE" = "200" ]; then
-          # Check if the specific tag actually exists in the response
-          TAG_EXISTS=$(curl -s "https://quay.io/api/v1/repository/${{ env.IMAGE_NAME }}/tag/?specificTag=${VERSION}" \
-            | grep -c "\"name\": \"${VERSION}\"" || true)
-
-          if [ "$TAG_EXISTS" -gt 0 ]; then
-            echo "Image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION} already exists"
-            echo "exists=true" >> $GITHUB_OUTPUT
+            if [ "$TAG_EXISTS" -gt 0 ]; then
+              echo "Image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION} already exists"
+              echo "exists=true" >> $GITHUB_OUTPUT
+            else
+              echo "Image does not exist yet"
+              echo "exists=false" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "Image does not exist yet"
+            echo "Registry check returned HTTP ${HTTP_CODE} - assuming image doesn't exist"
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
-        else
-          echo "Registry check returned HTTP ${HTTP_CODE} - assuming image doesn't exist"
-          echo "exists=false" >> $GITHUB_OUTPUT
-        fi
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Set up Docker Buildx (handles Containerfile heredocs correctly)
-    # ─────────────────────────────────────────────────────────────────────────
-    - name: Set up Docker Buildx
-      if: steps.check.outputs.exists == 'false'
-      uses: docker/setup-buildx-action@v3
+      # ─────────────────────────────────────────────────────────────────────────
+      # Set up Docker Buildx (handles Containerfile heredocs correctly)
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Log in to Quay.io
-    # ─────────────────────────────────────────────────────────────────────────
-    - name: Log in to Quay.io
-      if: steps.check.outputs.exists == 'false'
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ secrets.QUAY_USERNAME }}
-        password: ${{ secrets.QUAY_PASSWORD }}
+      # ─────────────────────────────────────────────────────────────────────────
+      # Log in to Quay.io
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Log in to Quay.io
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Extract metadata for Docker labels
-    # ─────────────────────────────────────────────────────────────────────────
-    - name: Extract Docker metadata
-      if: steps.check.outputs.exists == 'false'
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        tags: |
-          type=raw,value=${{ steps.version.outputs.version }}
-          type=raw,value=latest
+      # ─────────────────────────────────────────────────────────────────────────
+      # Extract metadata for Docker labels
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Extract Docker metadata
+        if: steps.check.outputs.exists == 'false'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Build and push the container image
-    # Pass the detected version as a build arg so the Containerfile can use it
-    # ─────────────────────────────────────────────────────────────────────────
-    - name: Build and push OpenEMR image
-      if: steps.check.outputs.exists == 'false'
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: ./Containerfile
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        build-args: |
-          OPENEMR_VERSION=${{ steps.version.outputs.version }}
-        platforms: linux/amd64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        provenance: false
+      # ─────────────────────────────────────────────────────────────────────────
+      # Build and push the container image
+      # Pass the detected version as a build arg so the Containerfile can use it
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Build and push OpenEMR image
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            OPENEMR_VERSION=${{ steps.version.outputs.version }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Build summary
-    # ─────────────────────────────────────────────────────────────────────────
-    - name: Build summary
-      if: steps.check.outputs.exists == 'false'
-      run: |
-        echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Images pushed:**" >> $GITHUB_STEP_SUMMARY
-        echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Registry:** [quay.io/${{ env.IMAGE_NAME }}](https://${{ env.REGISTRY }}/repository/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
+      # ─────────────────────────────────────────────────────────────────────────
+      # Build summary
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Build summary
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Images pushed:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** [quay.io/${{ env.IMAGE_NAME }}](https://${{ env.REGISTRY }}/repository/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
 
-    - name: Skip summary
-      if: steps.check.outputs.exists == 'true'
-      run: |
-        echo "### ⏭️ Build skipped" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "Image \`${{ steps.version.outputs.version }}\` already exists in registry." >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "To force a rebuild, use **Run workflow** with **Force rebuild** checked." >> $GITHUB_STEP_SUMMARY
+      - name: Skip summary
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          echo "### ⏭️ Build skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Image \`${{ steps.version.outputs.version }}\` already exists in registry." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To force a rebuild, use **Run workflow** with **Force rebuild** checked." >> $GITHUB_STEP_SUMMARY
