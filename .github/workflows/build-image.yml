@@ -115,7 +115,7 @@ jobs:
         VERSION="${{ steps.version.outputs.version }}"
         FORCE="${{ inputs.force_rebuild }}"
 
-        if [ "$FORCE" = "true" ]; then
+        if [ "$FORCE" = "true" ] || [ "${{ github.event_name }}" = "schedule" ]; then
           echo "Force rebuild requested - skipping existence check"
           echo "exists=false" >> $GITHUB_OUTPUT
           exit 0
