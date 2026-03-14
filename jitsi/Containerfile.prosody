@@ -1,0 +1,97 @@
+# =============================================================================
+# Containerfile.prosody — Prosody XMPP Server
+# OpenShift restricted-v2 SCC compatible
+#
+# Prosody is the most complex port because the upstream image:
+#   - Runs init scripts as root that chown /etc/prosody and /var/lib/prosody
+#   - Expects a named 'prosody' OS user to exist at its real UID
+#   - Uses s6-overlay or tini for process supervision (also root-spawned)
+#
+# Our approach:
+#   - Create a real 'prosody' OS user at UID 1001/GID 0 so luasec/openssl
+#     can find the user in /etc/passwd (Java-style NSS lookup not needed
+#     here, but Prosody's Lua code occasionally calls os.getenv("USER"))
+#   - Pre-create and chmod all writable directories at build time
+#   - Patch the entrypoint wrapper to skip chown calls that would fail
+#
+# XMPP ports used (all >1024, no NET_BIND_SERVICE needed):
+#   5222  — XMPP client connections (jicofo → prosody)
+#   5269  — XMPP server-to-server federation (not used in Jitsi, but kept)
+#   5280  — BOSH/WebSocket HTTP endpoint
+#   5347  — XMPP component port (JVB component connects here)
+#
+# Maintainer: Ryan Nix <ryan.nix@gmail.com>
+# =============================================================================
+
+ARG JITSI_VERSION=stable
+FROM docker.io/jitsi/prosody:${JITSI_VERSION}
+
+USER root
+
+# 1. Create a real OS user entry so Prosody's Lua runtime can resolve the user.
+#    UID 1001, GID 0 — OpenShift will override UID at runtime but we need
+#    *some* named entry so processes that call getpwuid() don't fail.
+#    We use 'useradd' with -g 0 to pin GID to the root group.
+RUN id prosody 2>/dev/null && userdel prosody || true && \
+    useradd -u 1001 -g 0 -d /var/lib/prosody -s /sbin/nologin \
+            -c "Prosody XMPP Server" prosody
+
+# 2. Pre-create all directories Prosody writes to at runtime.
+#    chown UID 1001 + GID 0, chmod g=u so OpenShift's injected UID inherits
+#    group-write capability through GID 0.
+RUN mkdir -p \
+      /config \
+      /defaults \
+      /etc/prosody/conf.d \
+      /var/lib/prosody \
+      /var/log/prosody \
+      /var/run/prosody \
+      /tmp/prosody && \
+    chown -R 1001:0 \
+      /config \
+      /defaults \
+      /etc/prosody \
+      /var/lib/prosody \
+      /var/log/prosody \
+      /var/run/prosody \
+      /tmp/prosody && \
+    chmod -R g=u \
+      /config \
+      /defaults \
+      /etc/prosody \
+      /var/lib/prosody \
+      /var/log/prosody \
+      /var/run/prosody
+
+# 3. Patch entrypoint scripts: replace any `chown` calls with no-ops.
+#    The Jitsi entrypoint lives at /etc/cont-init.d/ (s6) or /init.
+#    This is belt-and-suspenders — our pre-created dirs should already
+#    have correct ownership, but this silences any remaining chown attempts.
+RUN find /etc/cont-init.d /etc/services.d /defaults /config \
+         -type f \( -name "*.sh" -o -name "run" -o -name "finish" \) \
+         -exec sed -i 's/^\s*chown\b.*$/: # chown disabled for OpenShift/g' {} + \
+    2>/dev/null || true && \
+    find /init -type f -exec \
+         sed -i 's/^\s*chown\b.*$/: # chown disabled for OpenShift/g' {} + \
+    2>/dev/null || true
+
+# 4. Ensure the PID file path is writable
+RUN touch /var/run/prosody/prosody.pid && \
+    chown 1001:0 /var/run/prosody/prosody.pid && \
+    chmod g=u /var/run/prosody/prosody.pid
+
+# ── Drop privileges ────────────────────────────────────────────────────────────
+USER 1001:0
+
+EXPOSE 5222
+EXPOSE 5269
+EXPOSE 5280
+EXPOSE 5347
+
+LABEL org.opencontainers.image.title="jitsi-prosody-openshift" \
+      org.opencontainers.image.description="Prosody XMPP server for Jitsi, patched for OpenShift restricted-v2 SCC (non-root, arbitrary UID, no privilege escalation)" \
+      org.opencontainers.image.url="https://quay.io/ryan_nix/jitsi-openshift" \
+      org.opencontainers.image.source="https://github.com/ryannix123/openemr-on-openshift" \
+      org.opencontainers.image.vendor="Community" \
+      io.openshift.expose-services="5222:xmpp,5269:xmpp-s2s,5280:bosh,5347:xmpp-component" \
+      maintainer="Ryan Nix <ryan.nix@gmail.com>"

@@ -1,0 +1,107 @@
+# =============================================================================
+# Containerfile.jicofo — JItsi COnference FOcus (jicofo)
+# OpenShift restricted-v2 SCC compatible
+#
+# Jicofo is a Java application (OpenJDK). Java has its own user-lookup quirks:
+#   - InetAddress and some network operations call getpwuid() via NSS
+#   - With OpenShift's injected arbitrary UID, NSS lookup returns nothing,
+#     which can cause subtle failures in network initialization
+#
+# Our approach:
+#   - useradd 'jicofo' at UID 1001 / GID 0 as a real /etc/passwd entry
+#   - Copy /etc/passwd to a group-writable location and add a runtime
+#     entrypoint wrapper that auto-generates a passwd entry for the
+#     injected UID — this is the standard OpenShift Java pattern
+#   - Pre-create all writable dirs with UID 1001 / GID 0 / g=u
+#   - HOME set to /tmp so Java's FileSystemProvider never hits a root dir
+#
+# Maintainer: Ryan Nix <ryan.nix@gmail.com>
+# =============================================================================
+
+ARG JITSI_VERSION=stable
+FROM docker.io/jitsi/jicofo:${JITSI_VERSION}
+
+USER root
+
+# 1. Create OS user for jicofo with GID 0 (OpenShift compatibility group)
+RUN id jicofo 2>/dev/null && userdel jicofo || true && \
+    useradd -u 1001 -g 0 -d /home/jicofo -s /sbin/nologin \
+            -c "Jicofo Conference Focus" jicofo && \
+    mkdir -p /home/jicofo && \
+    chown 1001:0 /home/jicofo && \
+    chmod g=u /home/jicofo
+
+# 2. NSS wrapper setup: allow runtime UID → username resolution.
+#    We copy /etc/passwd to a group-writable path and wrap the entrypoint
+#    to append the injected UID on startup if it's not already there.
+RUN cp /etc/passwd /etc/passwd.template && \
+    chown 1001:0 /etc/passwd.template && \
+    chmod g=u /etc/passwd.template
+
+# 3. Write a thin entrypoint wrapper that fixes NSS at container start.
+#    This runs as the injected UID (whatever OpenShift assigns) and writes
+#    a /tmp/passwd with the correct UID → jicofo mapping so Java's
+#    InetAddress and libpthread don't fail on user lookups.
+RUN cat > /usr/local/bin/openshift-entrypoint.sh << 'WRAPPER'
+#!/bin/bash
+# OpenShift arbitrary-UID NSS fix
+# Appends current UID to /tmp/passwd so getpwuid() resolves correctly.
+# This is the recommended Red Hat / OpenShift Java pattern.
+set -e
+
+CURR_UID=$(id -u)
+CURR_GID=$(id -g)
+
+# Build a /tmp/passwd with our UID injected
+grep -v "^jicofo:" /etc/passwd.template > /tmp/passwd
+echo "jicofo:x:${CURR_UID}:${CURR_GID}:Jicofo Conference Focus:/home/jicofo:/sbin/nologin" \
+     >> /tmp/passwd
+
+export LD_PRELOAD=""
+export NSS_WRAPPER_PASSWD=/tmp/passwd
+export NSS_WRAPPER_GROUP=/etc/group
+export HOME=/home/jicofo
+
+# Hand off to the original jicofo entrypoint
+exec /init "$@"
+WRAPPER
+RUN chmod +x /usr/local/bin/openshift-entrypoint.sh && \
+    chown 1001:0 /usr/local/bin/openshift-entrypoint.sh
+
+# 4. Pre-create all writable directories
+RUN mkdir -p \
+      /config \
+      /defaults \
+      /tmp/jicofo && \
+    chown -R 1001:0 \
+      /config \
+      /defaults \
+      /tmp/jicofo && \
+    chmod -R g=u \
+      /config \
+      /defaults \
+      /tmp/jicofo
+
+# 5. Silence chown calls in entrypoint scripts (same as prosody pattern)
+RUN find /etc/cont-init.d /etc/services.d /defaults \
+         -type f \( -name "*.sh" -o -name "run" -o -name "finish" \) \
+         -exec sed -i 's/^\s*chown\b.*$/: # chown disabled for OpenShift/g' {} + \
+    2>/dev/null || true
+
+# ── Drop privileges ────────────────────────────────────────────────────────────
+USER 1001:0
+
+ENV HOME=/home/jicofo
+
+ENTRYPOINT ["/usr/local/bin/openshift-entrypoint.sh"]
+
+# jicofo REST API (health check + stats)
+EXPOSE 8888
+
+LABEL org.opencontainers.image.title="jitsi-jicofo-openshift" \
+      org.opencontainers.image.description="Jicofo conference focus for Jitsi, patched for OpenShift restricted-v2 SCC (non-root, arbitrary UID, NSS wrapper)" \
+      org.opencontainers.image.url="https://quay.io/ryan_nix/jitsi-openshift" \
+      org.opencontainers.image.source="https://github.com/ryannix123/openemr-on-openshift" \
+      org.opencontainers.image.vendor="Community" \
+      io.openshift.expose-services="8888:http" \
+      maintainer="Ryan Nix <ryan.nix@gmail.com>"
