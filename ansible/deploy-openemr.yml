@@ -141,7 +141,7 @@
             namespace: "{{ openshift_namespace }}"
             kind: Deployment
             name: "{{ item }}"
-          loop: [openemr, redis, mariadb]
+          loop: [openemr, redis, mariadb, cqm-service]
           failed_when: false
 
         - name: Delete services
@@ -150,7 +150,7 @@
             namespace: "{{ openshift_namespace }}"
             kind: Service
             name: "{{ item }}"
-          loop: [openemr, redis, mariadb]
+          loop: [openemr, redis, mariadb, cqm-service]
           failed_when: false
 
         - name: Delete route
@@ -456,6 +456,77 @@
                   app: redis
                 type: ClusterIP
 
+        - name: Set CQM Deployment manifest
+          ansible.builtin.set_fact:
+            manifest_cqm_deployment:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: cqm-service
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: cqm-service
+                  app.kubernetes.io/name: cqm-service
+                  app.kubernetes.io/component: cqm
+                  app.kubernetes.io/part-of: openemr
+                  app.kubernetes.io/managed-by: ansible
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: cqm-service
+                template:
+                  metadata:
+                    labels:
+                      app: cqm-service
+                      app.kubernetes.io/name: cqm-service
+                      app.kubernetes.io/component: cqm
+                      app.kubernetes.io/part-of: openemr
+                  spec:
+                    containers:
+                      - name: cqm-service
+                        image: "{{ cqm_image | default('docker.io/openemr/oe-cqm-execution:latest') }}"
+                        ports:
+                          - containerPort: 6660
+                            name: cqm
+                        resources:
+                          limits:
+                            memory: 512Mi
+                            cpu: 250m
+                          requests:
+                            memory: 128Mi
+                            cpu: 50m
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          runAsNonRoot: true
+                          capabilities:
+                            drop:
+                              - ALL
+                          seccompProfile:
+                            type: RuntimeDefault
+
+        - name: Set CQM Service manifest
+          ansible.builtin.set_fact:
+            manifest_cqm_service:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: cqm-service
+                namespace: "{{ openshift_namespace }}"
+                labels:
+                  app: cqm-service
+                  app.kubernetes.io/name: cqm-service
+                  app.kubernetes.io/component: cqm
+                  app.kubernetes.io/part-of: openemr
+              spec:
+                ports:
+                  - port: 6660
+                    targetPort: 6660
+                    name: cqm
+                selector:
+                  app: cqm-service
+                type: ClusterIP
+
         - name: Set OpenEMR PVC manifest
           ansible.builtin.set_fact:
             manifest_openemr_pvc:
@@ -580,6 +651,8 @@
                               secretKeyRef:
                                 name: mariadb-secret
                                 key: database-password
+                          - name: CQM_SERVICE_URL
+                            value: "http://cqm-service:6660"
                         volumeMounts:
                           - name: openemr-sites
                             mountPath: /var/www/html/openemr/sites/default
@@ -713,6 +786,28 @@
               status: "True"
             wait_timeout: "{{ redis_wait_timeout }}"
 
+        - name: Apply CQM Deployment
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_cqm_deployment }}"
+
+        - name: Apply CQM Service
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ manifest_cqm_service }}"
+
+        - name: Wait for CQM service to be ready
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ openshift_namespace }}"
+            label_selectors:
+              - app=cqm-service
+            wait: true
+            wait_condition:
+              type: Ready
+              status: "True"
+            wait_timeout: 120
+
         - name: Apply OpenEMR PVC
           kubernetes.core.k8s:
             state: present
@@ -789,6 +884,10 @@
               manifest: "{{ manifest_redis_deployment }}"
             - filename: "06-redis-service.yaml"
               manifest: "{{ manifest_redis_service }}"
+            - filename: "06a-cqm-deployment.yaml"
+              manifest: "{{ manifest_cqm_deployment }}"
+            - filename: "06b-cqm-service.yaml"
+              manifest: "{{ manifest_cqm_service }}"
             - filename: "07-openemr-pvc.yaml"
               manifest: "{{ manifest_openemr_pvc }}"
             - filename: "08-openemr-secret.yaml"
@@ -818,6 +917,8 @@
                 - 04-mariadb-service.yaml
                 - 05-redis-deployment.yaml
                 - 06-redis-service.yaml
+                - 06a-cqm-deployment.yaml
+                - 06b-cqm-service.yaml
                 - 07-openemr-pvc.yaml
                 - 08-openemr-secret.yaml
                 - 09-openemr-deployment.yaml
