@@ -1,6 +1,10 @@
-# OpenEMR on OpenShift
+# OpenEMR on OpenShift Developer Sandbox
 
-[![OpenEMR Version](https://img.shields.io/badge/OpenEMR-8.0.0-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE0IDJINmEyIDIgMCAwIDAtMiAydjE2YTIgMiAwIDAgMCAyIDJoMTJhMiAyIDIgMCAwIDAtMlY4eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE0IDIgMTQgOCAyMCA4Ij48L3BvbHlsaW5lPjxsaW5lIHgxPSIxNiIgeTE9IjEzIiB4Mj0iOCIgeTI9IjEzIj48L2xpbmU+PGxpbmUgeDE9IjE2IiB5MT0iMTciIHgyPSI4IiB5Mj0iMTciPjwvbGluZT48cG9seWxpbmUgcG9pbnRzPSIxMCA5IDkgOSA4IDkiPjwvcG9seWxpbmU+PC9zdmc+)](https://www.open-emr.org/)
+<p align="center">
+  <img src="https://www.open-emr.org/images/openemr-blue-logo.png" alt="OpenEMR Logo" width="300" />
+</p>
+
+[![OpenEMR Version](https://img.shields.io/badge/OpenEMR-8.0.0-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE0IDJINmEyIDIgMCAwIDAtMiAydjE2YTIgMiAwIDAgMCAyIDJoMTJhMiAyIDAgMCAwIDItMlY4eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE0IDIgMTQgOCAyMCA4Ij48L3BvbHlsaW5lPjxsaW5lIHgxPSIxNiIgeTE9IjEzIiB4Mj0iOCIgeTI9IjEzIj48L2xpbmU+PGxpbmUgeDE9IjE2IiB5MT0iMTciIHgyPSI4IiB5Mj0iMTciPjwvbGluZT48cG9seWxpbmUgcG9pbnRzPSIxMCA5IDkgOSA4IDkiPjwvcG9seWxpbmU+PC9zdmc+)](https://www.open-emr.org/)
 [![PHP Version](https://img.shields.io/badge/PHP-8.5-777BB4?style=flat-square&logo=php&logoColor=white)](https://www.php.net/)
 [![MariaDB Version](https://img.shields.io/badge/MariaDB-11.8-003545?style=flat-square&logo=mariadb&logoColor=white)](https://mariadb.org/)
 [![Redis Version](https://img.shields.io/badge/Redis-8-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io/)
@@ -10,11 +14,11 @@
 [![ONC Certified](https://img.shields.io/badge/ONC-Certified-success?style=flat-square&logo=check-circle&logoColor=white)](https://chpl.healthit.gov/#/listing/10938)
 [![Build and Push OpenEMR](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml/badge.svg)](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml)
 
-Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository. Compatible with Developer Sandbox, Single Node OpenShift (SNO), and full OpenShift clusters.
+Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift Developer Sandbox using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository.
 
 ## Overview
 
-This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift. The deploy script auto-detects the cluster's default storage class, so the same script works on Developer Sandbox (AWS EBS), Single Node OpenShift with LVM Storage, ODF-backed clusters, and any other OpenShift environment without modification.
+This project provides a complete containerized deployment of OpenEMR (Open-source Electronic Medical Records) on Red Hat OpenShift Developer Sandbox.
 
 ### 🚀 Technology Stack
 
@@ -33,14 +37,14 @@ This project provides a complete containerized deployment of OpenEMR (Open-sourc
 - **Custom OpenEMR Container**: Built on CentOS 10 Stream with Remi's PHP 8.5
 - **Redis Session Storage**: Redis 8 Alpine for improved performance and scalability
 - **MariaDB 11.8**: Latest Fedora MariaDB for robust database backend
-- **Platform Agnostic**: Auto-detects the cluster default storage class — works on Developer Sandbox, SNO, ODF, and full clusters without modification
+- **Developer Sandbox Ready**: Optimized for Developer Sandbox storage and resource constraints
 - **OpenShift Native**: Designed for OpenShift SCCs and security constraints
 - **Production Ready**: Includes health checks, resource limits, and monitoring
 - **HIPAA Considerations**: Encrypted transport, audit logging capabilities
 - **Auto-Configuration**: Zero-touch deployment with automated setup
 - **US Core 8.0 / USCDI v5**: Latest FHIR interoperability standards
 
-**Note**: OpenEMR runs as a single replica because it uses ReadWriteOnce (RWO) persistent storage. This is suitable for development, demo, and small practice environments. For high availability, use a storage class that supports ReadWriteMany (RWX), such as ODF CephFS, and scale to multiple replicas.
+**Note**: This deployment is configured for OpenShift Developer Sandbox which uses AWS EBS storage (ReadWriteOnce only). OpenEMR runs as a single replica, suitable for development, demo, and small practice environments.
 
 ## Why OpenEMR?
 
@@ -101,11 +105,12 @@ Whether you're a solo practitioner, a community health center, or a large health
         └─────────────────┘
 ```
 
-**Storage Notes:**
-- The deploy script auto-detects the cluster default storage class (e.g. `lvms-vg1` on SNO, `gp3-csi` on Developer Sandbox, `ocs-storagecluster-ceph-rbd` on ODF)
-- Override with: `STORAGE_CLASS=my-class ./deploy-openemr.sh`
-- Single OpenEMR replica due to ReadWriteOnce (RWO) storage — scale with RWX storage if needed
+**Developer Sandbox Constraints:**
+- AWS EBS storage (gp3) provides ReadWriteOnce (RWO) volumes only
+- Single OpenEMR replica due to RWO storage limitation
+- Resource quotas: ~768Mi RAM and ~500m CPU per container
 - Total storage: 16Gi (5Gi database + 10Gi documents + 1Gi Redis)
+- Redis 8 Alpine for PHP session storage
 
 ## Components
 
@@ -145,19 +150,17 @@ Whether you're a solo practitioner, a community health center, or a large health
 
 ## Prerequisites
 
-- Red Hat OpenShift cluster — any of:
-  - [Developer Sandbox](https://developers.redhat.com/developer-sandbox) (free, no cluster-admin required)
-  - Single Node OpenShift (SNO)
-  - Full OpenShift cluster
+- Red Hat OpenShift Developer Sandbox account ([Get free access](https://developers.redhat.com/developer-sandbox))
 - `oc` CLI tool installed and configured
 - Access to Quay.io for pulling container images (or build your own)
 - Basic understanding of Kubernetes/OpenShift concepts
 
-**Developer Sandbox specific limitations:**
+**Developer Sandbox Limitations to be aware of:**
 - Projects expire after 30 days of inactivity
 - Storage limited to ~40GB total per namespace
 - Resource quotas: Limited CPU/memory per namespace
-- No cluster-admin access (Service Mesh sub-project not supported)
+- No cluster-admin access
+- Single replica deployments recommended for persistent storage
 
 ## Quick Start
 
@@ -185,16 +188,12 @@ Or use the pre-built image: `quay.io/ryan_nix/openemr-openshift:latest`
 
 ### 3. Configure the Deployment (Optional)
 
-The script auto-detects the cluster's default storage class and works without any configuration changes. To override the storage class:
+The script is pre-configured for Developer Sandbox with sensible defaults:
+- Storage: `gp3` (default Developer Sandbox storage class)
+- Database: 5Gi
+- Documents: 10Gi
 
-```bash
-export STORAGE_CLASS=lvms-vg1   # SNO with LVM Storage
-# or
-export STORAGE_CLASS=ocs-storagecluster-ceph-rbd   # ODF
-# or just run without setting it — the default is auto-detected
-```
-
-Storage sizes can be adjusted by editing the variables at the top of `deploy-openemr.sh` if needed.
+You can optionally adjust these in `deploy-openemr.sh` if needed, but defaults work well for most cases.
 
 ### 4. Login to OpenShift Developer Sandbox
 
@@ -227,30 +226,23 @@ The script will:
 
 ### Storage Classes
 
-The deploy script auto-detects the cluster's default storage class at runtime. No configuration is needed for standard environments:
+The deployment uses **AWS EBS gp3** storage (default in Developer Sandbox):
 
-| Environment | Typical Default Storage Class | Access Mode |
-|---|---|---|
-| Developer Sandbox | `gp3-csi` | RWO |
-| SNO with LVM Storage | `lvms-vg1` | RWO |
-| ODF (full cluster) | `ocs-storagecluster-ceph-rbd` | RWO / RWX |
+- **Access Mode**: ReadWriteOnce (RWO) only
+- **Storage Class**: `gp3` (default)
+- **Available**: gp2, gp2-csi, gp3, gp3-csi (all RWO)
+- **Not Available**: ReadWriteMany (RWX) storage
 
-To override the auto-detected class:
-```bash
-STORAGE_CLASS=my-storage-class ./deploy-openemr.sh
-```
-
-OpenEMR runs as a single replica with RWO storage, suitable for development, testing, and small practice environments.
+**Note**: Due to RWO storage limitations, OpenEMR runs as a single replica. This is suitable for development, testing, and small practice environments.
 
 ### Scaling
 
-**Important**: Scaling to multiple replicas requires ReadWriteMany (RWX) storage. With the default RWO storage class, OpenEMR runs as a single replica.
+**Important**: Scaling to multiple replicas is not supported with RWO storage. If you need high availability:
 
-To scale:
-1. Use an RWX-capable storage class (e.g., ODF CephFS: `ocs-storagecluster-cephfs`)
-2. Redeploy with: `STORAGE_CLASS=ocs-storagecluster-cephfs ./deploy-openemr.sh`
-3. Change `ReadWriteOnce` to `ReadWriteMany` in the documents PVC
-4. Then scale: `oc scale deployment/openemr --replicas=3`
+1. Deploy on a full OpenShift cluster with RWX storage (e.g., ODF CephFS)
+2. Update storage class to RWX-capable storage
+3. Change `ReadWriteOnce` to `ReadWriteMany` in documents PVC
+4. Then scale: `oc scale deployment/openemr --replicas=3 -n openemr`
 
 ### Resource Limits
 
@@ -314,6 +306,37 @@ The container exposes these endpoints:
 
 - `/health` - General health check (returns 200)
 - `/fpm-status` - PHP-FPM status page
+
+## Waking Up After Developer Sandbox Idling
+
+The OpenShift Developer Sandbox automatically idles deployments after a period of inactivity, scaling all pods to zero. To resume your OpenEMR deployment:
+
+### Scale Everything Back Up
+
+```bash
+# Wake up all components
+oc scale statefulset/mariadb --replicas=1 -n openemr
+oc scale deployment/redis --replicas=1 -n openemr
+oc scale deployment/openemr --replicas=1 -n openemr
+```
+
+### Wait for Pods to Become Ready
+
+```bash
+# Watch pod status
+oc get pods -n openemr -w
+```
+
+Wait until all pods show `Running` and `1/1` (or `2/2` if running with the Service Mesh sidecar). MariaDB will take the longest — it needs to complete its startup sequence before OpenEMR can connect.
+
+### Verify the Route
+
+```bash
+# Confirm the route is accessible
+oc get route openemr -n openemr
+```
+
+> **Tip**: Bookmark the OpenShift web console for your sandbox namespace. You can also resume deployments visually from **Workloads → Deployments** without needing the CLI.
 
 ## Troubleshooting
 
@@ -389,8 +412,8 @@ For production healthcare deployments:
 
 1. **Enable Encryption at Rest**:
    ```bash
-   # Use an encrypted storage class (ODF example)
-   STORAGE_CLASS=ocs-storagecluster-ceph-rbd-encrypted ./deploy-openemr.sh
+   # Use encrypted storage classes
+   STORAGE_CLASS="ocs-storagecluster-ceph-rbd-encrypted"
    ```
 
 2. **Implement Network Policies**:
@@ -435,78 +458,51 @@ For production healthcare deployments:
      pod-security.kubernetes.io/warn=restricted
    ```
 
-## Service Mesh — Zero Trust Networking
+## Maintenance
 
-The `service-mesh/` sub-project adds a zero-trust networking layer using **OpenShift Service Mesh 3 (OSSM 3) in ambient mode**. This is an optional but strongly recommended addition for any environment handling real patient data.
+### Backup
 
-### Why Service Mesh for a Healthcare Workload?
-
-The base deployment secures the perimeter — TLS on the route, resource isolation via namespaces — but by default, pod-to-pod traffic inside the cluster is unencrypted and unrestricted. Any workload that gains a foothold in the `openemr` namespace can freely connect to MariaDB or Redis and sniff credentials or patient data in transit. The service mesh closes this gap.
-
-### What OSSM 3 Ambient Mode Adds
-
-| Layer | What It Does |
-|-------|-------------|
-| **Automatic mTLS (ztunnel)** | All pod-to-pod traffic is encrypted and mutually authenticated without any changes to OpenEMR, MariaDB, or Redis |
-| **Identity-based AuthorizationPolicies** | Only OpenEMR's service account identity can reach MariaDB (port 3306) and Redis (port 6379) — no other pod can connect regardless of IP |
-| **Waypoint Proxy** | Enforces L7 policies via an Envoy-based proxy deployed per namespace, required for fine-grained HTTP-level controls |
-| **NetworkPolicies** | L3/L4 isolation enforced by OVN-Kubernetes independent of the mesh — defense in depth |
-| **EgressFirewall** | Pods may only initiate outbound connections to an explicit allow-list; a compromised pod cannot phone home |
-
-### Ambient Mode vs. Traditional Sidecar (OSSM 2.x)
-
-OSSM 3 uses a fundamentally different architecture. Instead of injecting an Envoy sidecar into every pod (which requires pod restarts and shows as `2/2` containers), ambient mode deploys a `ztunnel` DaemonSet that intercepts traffic at the Linux network namespace level on each node. Pods remain `1/1` and are enrolled simply by labeling the namespace — no rollout required. A separate waypoint proxy handles L7 policy enforcement only where needed.
-
-> **Requirement**: OSSM 3 requires cluster-admin access to install the Sail Operator and the `IstioCNI` DaemonSet. It is **not compatible with the Developer Sandbox**. Use a full OpenShift cluster or Single Node OpenShift (SNO).
-
-### Quick Start
-
+**Database backup:**
 ```bash
-cd service-mesh/
-chmod +x deploy-mesh.sh
-
-# Full install: operators, control plane, policies, Kiali
-./deploy-mesh.sh --full
-
-# Or step by step — useful if OpenEMR is already deployed:
-./deploy-mesh.sh --operators      # Install Sail + Kiali operators, Gateway API CRDs
-./deploy-mesh.sh --control-plane  # Deploy Istio + ztunnel
-./deploy-mesh.sh --policies       # Enroll namespace, waypoint, AuthZ, NetworkPolicy, Egress
-
-# Check status at any point
-./deploy-mesh.sh --status
+# Create database dump
+oc exec -it statefulset/mariadb -n openemr -- \
+  mysqldump -u root -p"$DB_ROOT_PASSWORD" openemr > openemr-backup-$(date +%Y%m%d).sql
 ```
 
-See [`service-mesh/README.md`](service-mesh/README.md) for the full deployment guide, manifest reference, HIPAA alignment table, and troubleshooting steps.
+**Document backup:**
+```bash
+# Backup documents PVC
+oc rsync openemr-pod:/var/www/html/openemr/sites/default/documents ./backup/documents/
+```
+
+### Updates
+
+**Update OpenEMR container:**
+```bash
+# Build new version
+podman build -t quay.io/ryan_nix/openemr-openshift:7.0.6 .
+podman push quay.io/ryan_nix/openemr-openshift:7.0.6
+
+# Update deployment
+oc set image deployment/openemr \
+  openemr=quay.io/ryan_nix/openemr-openshift:7.0.6 -n openemr
+```
 
 ## Project Structure
 
 ```
-openemr-on-openshift/
-├── Containerfile                  # Container build instructions
-├── deploy-openemr.sh              # Automated deployment script
-├── README.md                      # This file
-├── .containerignore               # Files to ignore during build
-├── manifests/                     # Individual YAML manifests
-│   ├── deployment.yaml
-│   ├── service.yaml
-│   ├── route.yaml
-│   └── mariadb/
-│       ├── statefulset.yaml
-│       └── service.yaml
-└── service-mesh/                  # Zero-trust networking sub-project (OSSM 3)
-    ├── README.md                  # Service mesh deployment guide
-    ├── deploy-mesh.sh             # Operator + mesh deployment script
-    └── manifests/
-        ├── 00-sail-operator.yaml  # Sail Operator subscription (OLM)
-        ├── 00-kiali-operator.yaml # Kiali Operator subscription + Kiali CR
-        ├── 01-istio.yaml          # Istio CR (ambient profile)
-        ├── 02-istiocni.yaml       # IstioCNI CR (ztunnel DaemonSet)
-        ├── 03-namespace.yaml      # Namespace with ambient enrollment label
-        ├── 04-waypoint.yaml       # Waypoint proxy (L7 policy enforcement)
-        ├── 05-authz-policies.yaml # AuthorizationPolicies (default-deny + allows)
-        ├── 06-network-policies.yaml # NetworkPolicies (L3/L4 CNI isolation)
-        └── 07-egress-firewall.yaml  # EgressFirewall (OVN-Kubernetes)
+openemr-openshift/
+├── Containerfile              # Container build instructions
+├── deploy-openemr.sh          # Automated deployment script
+├── README.md                  # This file
+├── .containerignore           # Files to ignore during build
+└── manifests/                 # (Optional) Individual YAML files
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── route.yaml
+    └── mariadb/
+        ├── statefulset.yaml
+        └── service.yaml
 ```
 
 ## Contributing
@@ -525,7 +521,6 @@ Contributions are welcome! Areas for improvement:
 - [OpenEMR Official Site](https://www.open-emr.org/)
 - [OpenEMR Documentation](https://www.open-emr.org/wiki/index.php/OpenEMR_Wiki_Home_Page)
 - [Red Hat OpenShift Documentation](https://docs.openshift.com/)
-- [OpenShift Service Mesh 3 Documentation](https://docs.openshift.com/container-platform/latest/service_mesh/v3x/ossm-about.html)
 - [OpenShift Data Foundation](https://www.redhat.com/en/technologies/cloud-computing/openshift-data-foundation)
 
 ## License
@@ -547,4 +542,4 @@ This project follows OpenEMR's licensing. OpenEMR is licensed under GPL v3.
 
 ---
 
-**Note**: This is designed for healthcare environments. Ensure compliance with HIPAA, HITECH, and other applicable regulations in your jurisdiction before deploying with real patient data. Test thoroughly in a non-production environment before any clinical use.
+**Note**: This is designed for healthcare environments. Ensure compliance with HIPAA, HITECH, and other applicable regulations in your jurisdiction before deploying with real patient data.
