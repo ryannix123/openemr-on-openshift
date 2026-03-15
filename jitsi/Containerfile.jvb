@@ -1,117 +1,78 @@
 # =============================================================================
-# Containerfile.jvb — Jitsi Videobridge (JVB)
-# OpenShift restricted-v2 SCC compatible
+# Containerfile.jvb — Jitsi Videobridge
+# Multi-stage: upstream jitsi/jvb → CentOS Stream 10
 #
-# JVB is the media relay — the most network-sensitive component.
-# It is a Java application (same NSS/passwd concerns as jicofo).
-#
-# Key OpenShift challenges for JVB:
-#   1. hostNetwork: true is commonly used upstream (NOT allowed in restricted SCC)
-#      → Replace with an explicit NodePort or LoadBalancer Service for UDP/10000
-#      → JVB_ADVERTISE_IPS must be set to the external IP of that Service
-#
-#   2. UDP/10000 binding: The JVB process binds directly to the container's
-#      UDP port. In OpenShift, this port is reachable via the Service — JVB
-#      does NOT need hostNetwork for this to work.
-#
-#   3. JVB_WS_DOMAIN / Colibri WebSocket: JVB's Colibri2 signaling uses
-#      WebSocket on port 9090. This is a normal TCP port, handled via a
-#      ClusterIP Service and OpenShift Route (wss://).
-#
-# Deployment note: In your OpenShift manifest, set:
-#   env:
-#     - name: JVB_ADVERTISE_IPS
-#       value: "<external IP of the UDP LoadBalancer or NodePort node IP>"
-#     - name: JVB_PORT
-#       value: "10000"
+# Replaces Debian + s6-overlay with CentOS Stream 10 + OpenJDK from dnf.
+# The JVB jar and its dependencies are COPY'd from the upstream image.
+# Java jars are platform-independent so no binary compatibility issues.
+# A simple bash entrypoint replaces s6.
+# hostNetwork removed — UDP/10000 exposed via NodePort or LoadBalancer Service.
 #
 # Maintainer: Ryan Nix <ryan.nix@gmail.com>
 # =============================================================================
 
 ARG JITSI_VERSION=stable
-FROM docker.io/jitsi/jvb:${JITSI_VERSION}
+
+# ── Stage 1: upstream source ─────────────────────────────────────────────────
+FROM docker.io/jitsi/jvb:${JITSI_VERSION} AS upstream
+
+# ── Stage 2: CentOS Stream 10 final image ────────────────────────────────────
+FROM quay.io/centos/centos:stream10
 
 USER root
 
-# 1. Create OS user for jvb at UID 1001 / GID 0
+# Install Java runtime
+RUN dnf install -y --nogpgcheck java-21-openjdk-headless && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Copy JVB application and config scaffolding from upstream
+COPY --from=upstream /usr/share/jitsi-videobridge  /usr/share/jitsi-videobridge
+COPY --from=upstream /defaults                      /defaults
+COPY --from=upstream /etc/cont-init.d               /etc/cont-init.d
+COPY --from=upstream /usr/local/bin/tpl             /usr/local/bin/tpl
+
+# Create jvb user at UID 1001 / GID 0 for NSS resolution
 RUN id jvb 2>/dev/null && userdel jvb || true && \
     useradd -u 1001 -g 0 -d /home/jvb -s /sbin/nologin \
             -c "Jitsi Videobridge" jvb && \
-    mkdir -p /home/jvb && \
-    chown 1001:0 /home/jvb && \
-    chmod g=u /home/jvb
+    mkdir -p /home/jvb /config && \
+    chown -R 1001:0 \
+      /home/jvb \
+      /config \
+      /defaults \
+      /usr/share/jitsi-videobridge \
+      /usr/local/bin/tpl && \
+    chmod -R g=u \
+      /home/jvb \
+      /config \
+      /defaults \
+      /usr/share/jitsi-videobridge && \
+    chmod 0755 /usr/local/bin/tpl && \
+    chmod -R +x /etc/cont-init.d/
 
-# 2. NSS wrapper setup (same pattern as jicofo — required for Java network ops)
+# NSS wrapper: copy /etc/passwd for runtime UID resolution
 RUN cp /etc/passwd /etc/passwd.template && \
     chown 1001:0 /etc/passwd.template && \
     chmod g=u /etc/passwd.template
 
-RUN cat > /usr/local/bin/openshift-entrypoint.sh << 'WRAPPER'
-#!/bin/bash
-# OpenShift arbitrary-UID NSS fix for JVB (Java)
-set -e
-
-CURR_UID=$(id -u)
-CURR_GID=$(id -g)
-
-grep -v "^jvb:" /etc/passwd.template > /tmp/passwd
-echo "jvb:x:${CURR_UID}:${CURR_GID}:Jitsi Videobridge:/home/jvb:/sbin/nologin" \
-     >> /tmp/passwd
-
-export LD_PRELOAD=""
-export NSS_WRAPPER_PASSWD=/tmp/passwd
-export NSS_WRAPPER_GROUP=/etc/group
-export HOME=/home/jvb
-
-exec /init "$@"
-WRAPPER
-RUN chmod +x /usr/local/bin/openshift-entrypoint.sh && \
+COPY openshift-entrypoint-jvb.sh /usr/local/bin/openshift-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/openshift-entrypoint.sh && \
     chown 1001:0 /usr/local/bin/openshift-entrypoint.sh
 
-# 3. Pre-create all writable directories JVB needs at runtime
-RUN mkdir -p \
-      /config \
-      /defaults \
-      /tmp/jvb \
-      /tmp/hsperfdata_jvb && \
-    chown -R 1001:0 \
-      /config \
-      /defaults \
-      /tmp/jvb \
-      /tmp/hsperfdata_jvb && \
-    chmod -R g=u \
-      /config \
-      /defaults \
-      /tmp/jvb
-
-# 4. JVM hsperfdata directory — Java writes perf counters here by default.
-#    The default path /tmp/hsperfdata_<username> varies by injected UID.
-#    Set JAVA_TOOL_OPTIONS to disable perf data writing entirely (safer for
-#    read-only filesystem scenarios) and point tmp to /tmp.
-ENV JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/tmp -XX:-UsePerfData"
-
-# 5. Silence chown calls in entrypoint scripts
-RUN find /etc/cont-init.d /etc/services.d /defaults \
-         -type f \( -name "*.sh" -o -name "run" -o -name "finish" \) \
-         -exec sed -i 's/^\s*chown\b.*$/: # chown disabled for OpenShift/g' {} + \
-    2>/dev/null || true
-
-# ── Drop privileges ────────────────────────────────────────────────────────────
 USER 1001:0
 
 ENV HOME=/home/jvb
+ENV JAVA_SYS_PROPS="-Djava.io.tmpdir=/tmp -XX:-UsePerfData"
+
+EXPOSE 10000/udp
+EXPOSE 9090
+EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/openshift-entrypoint.sh"]
 
-# UDP media relay port (map via NodePort or LoadBalancer Service)
-EXPOSE 10000/udp
-# Colibri2 WebSocket / REST API
-EXPOSE 9090
-# JVB statistics / health
-EXPOSE 8080
-
 LABEL org.opencontainers.image.title="jitsi-jvb-openshift" \
-      org.opencontainers.image.description="Jitsi Videobridge, patched for OpenShift restricted-v2 SCC (non-root, arbitrary UID, no hostNetwork)" \
+      org.opencontainers.image.description="Jitsi Videobridge on CentOS Stream 10, OpenShift restricted-v2 SCC compatible" \
       org.opencontainers.image.url="https://quay.io/ryan_nix/jitsi-openshift" \
       org.opencontainers.image.source="https://github.com/ryannix123/openemr-on-openshift" \
       org.opencontainers.image.vendor="Community" \

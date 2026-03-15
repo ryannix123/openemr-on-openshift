@@ -195,8 +195,10 @@ for comp in "${COMPONENTS[@]}"; do
       podman build \
         --platform "${platform}" \
         --build-arg JITSI_VERSION="${VERSION}" \
+        --no-cache \
+        --pull=always \
+        --security-opt seccomp=unconfined \
         --format oci \
-        --pull=newer \
         -f "${CONTAINERFILE}" \
         -t "${PLATFORM_TAG}" \
         . || { error "Build failed for ${comp} (${platform})"; BUILD_OK=false; break; }
@@ -205,6 +207,8 @@ for comp in "${COMPONENTS[@]}"; do
       buildah build \
         --platform "${platform}" \
         --build-arg JITSI_VERSION="${VERSION}" \
+        --no-cache \
+        --pull-always \
         --format oci \
         -f "${CONTAINERFILE}" \
         -t "${PLATFORM_TAG}" \

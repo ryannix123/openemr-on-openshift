@@ -1,47 +1,52 @@
 # =============================================================================
 # Containerfile.meet — Jitsi Meet Web Frontend
-# OpenShift restricted-v2 SCC compatible
+# Multi-stage: upstream jitsi/web → CentOS Stream 10
 #
-# Key changes from upstream jitsi/web:
-#   - nginx remapped from port 80 → 8080 (no NET_BIND_SERVICE needed)
-#   - All writable paths chowned to UID 1001, GID 0 with g=u permissions
-#     so OpenShift's arbitrary UID injection survives at runtime
-#   - readOnlyRootFilesystem-safe: volatile paths use emptyDir in manifests
-#   - No allowPrivilegeEscalation, no root capability requirements
+# Replaces Debian + s6-overlay with CentOS Stream 10 + nginx from dnf.
+# The static web assets, config templates, cont-init.d scripts, and the
+# 'tpl' config renderer are COPY'd from the upstream image.
+# A simple bash entrypoint replaces s6: run cont-init.d in order, exec nginx.
 #
-# Container labels follow OCI Image Spec + OpenShift conventions.
 # Maintainer: Ryan Nix <ryan.nix@gmail.com>
 # =============================================================================
 
 ARG JITSI_VERSION=stable
-FROM docker.io/jitsi/web:${JITSI_VERSION}
 
-# ── Temporarily root for permission surgery only ──────────────────────────────
+# ── Stage 1: upstream source ─────────────────────────────────────────────────
+FROM docker.io/jitsi/web:${JITSI_VERSION} AS upstream
+
+# ── Stage 2: CentOS Stream 10 final image ────────────────────────────────────
+FROM quay.io/centos/centos:stream10
+
 USER root
 
-# 1. Remap nginx from privileged port 80 to 8080 in all config locations
-RUN find /defaults /etc/nginx -name "*.conf" -exec \
+# Install nginx (port 8080 — no NET_BIND_SERVICE needed at >1024)
+RUN dnf install -y --nogpgcheck nginx && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Copy application files from upstream
+COPY --from=upstream /usr/share/jitsi-meet       /usr/share/jitsi-meet
+COPY --from=upstream /defaults                    /defaults
+COPY --from=upstream /etc/cont-init.d             /etc/cont-init.d
+COPY --from=upstream /etc/nginx/nginx.conf        /etc/nginx/nginx.conf
+COPY --from=upstream /etc/nginx/conf.d            /etc/nginx/conf.d
+COPY --from=upstream /usr/local/bin/tpl           /usr/local/bin/tpl
+
+# Remap nginx from port 80 → 8080 in all configs
+RUN find /etc/nginx /defaults -name "*.conf" -exec \
       sed -i \
         -e 's/listen 80\b/listen 8080/g' \
         -e 's/listen \[::\]:80\b/listen [::]:8080/g' \
         -e 's/listen 443\b/listen 8443/g' \
         -e 's/listen \[::\]:443\b/listen [::]:8443/g' \
-      {} + 2>/dev/null || true
-
-# 2. Patch nginx.conf to run without a master process pid file in /run (root-owned)
-#    Write pid to /tmp/nginx.pid instead
-RUN sed -i 's|pid /run/nginx.pid|pid /tmp/nginx.pid|g' \
-      /etc/nginx/nginx.conf 2>/dev/null || true && \
-    sed -i 's|pid /var/run/nginx.pid|pid /tmp/nginx.pid|g' \
+      {} + 2>/dev/null || true && \
+    sed -i 's|pid /run/nginx.pid|pid /tmp/nginx.pid|g' \
       /etc/nginx/nginx.conf 2>/dev/null || true
 
-# 3. Pre-create all directories that nginx + jitsi-meet entrypoint writes to,
-#    owned by UID 1001, GID 0 (OpenShift's fixed group), with g=u so the
-#    injected arbitrary UID inherits group-write access.
+# Pre-create writable directories with GID 0 / g=u for arbitrary UID injection
 RUN mkdir -p \
       /config \
-      /defaults \
-      /usr/share/jitsi-meet \
       /var/cache/nginx \
       /var/cache/nginx/client_temp \
       /var/cache/nginx/proxy_temp \
@@ -54,29 +59,38 @@ RUN mkdir -p \
       /usr/share/jitsi-meet \
       /var/cache/nginx \
       /var/log/nginx \
-      /tmp/nginx && \
+      /tmp/nginx \
+      /etc/nginx \
+      /usr/local/bin/tpl && \
     chmod -R g=u \
       /config \
       /defaults \
       /usr/share/jitsi-meet \
       /var/cache/nginx \
-      /var/log/nginx && \
-    # nginx needs to read its own installed configs — ensure group-read
-    chown -R 1001:0 /etc/nginx && \
-    chmod -R g=u /etc/nginx
+      /var/log/nginx \
+      /etc/nginx && \
+    chmod 0755 /usr/local/bin/tpl && \
+    # Make cont-init.d scripts executable
+    chmod -R +x /etc/cont-init.d/
 
-# ── Drop to unprivileged user — never goes back to root ───────────────────────
-# GID 0 is the OpenShift compatibility GID. Arbitrary UID injected at runtime.
+# Write a simple s6-replacement entrypoint:
+# Run cont-init.d scripts in order, then exec nginx directly.
+# No init system, no supervision daemon, no CAP_SYS_ADMIN needed.
+COPY openshift-entrypoint-meet.sh /usr/local/bin/openshift-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/openshift-entrypoint.sh && \
+    chown 1001:0 /usr/local/bin/openshift-entrypoint.sh
+
 USER 1001:0
 
 EXPOSE 8080
 EXPOSE 8443
 
+ENTRYPOINT ["/usr/local/bin/openshift-entrypoint.sh"]
+
 LABEL org.opencontainers.image.title="jitsi-meet-openshift" \
-      org.opencontainers.image.description="Jitsi Meet web frontend, patched for OpenShift restricted-v2 SCC (non-root, arbitrary UID, no privilege escalation)" \
+      org.opencontainers.image.description="Jitsi Meet web frontend on CentOS Stream 10, OpenShift restricted-v2 SCC compatible" \
       org.opencontainers.image.url="https://quay.io/ryan_nix/jitsi-openshift" \
       org.opencontainers.image.source="https://github.com/ryannix123/openemr-on-openshift" \
       org.opencontainers.image.vendor="Community" \
       io.openshift.expose-services="8080:http,8443:https" \
-      io.openshift.non-scalable="false" \
       maintainer="Ryan Nix <ryan.nix@gmail.com>"
