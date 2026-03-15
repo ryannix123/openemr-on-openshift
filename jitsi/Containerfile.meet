@@ -21,17 +21,32 @@ FROM quay.io/centos/centos:stream10
 USER root
 
 # Install nginx (port 8080 — no NET_BIND_SERVICE needed at >1024)
-RUN dnf install -y --nogpgcheck nginx && \
+RUN dnf install -y nginx bind-utils && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
 # Copy application files from upstream
 COPY --from=upstream /usr/share/jitsi-meet       /usr/share/jitsi-meet
 COPY --from=upstream /defaults                    /defaults
+
+# Patch port 80 → 8080 in /defaults templates so 10-config generates
+# configs with the correct port from the start, avoiding runtime patching.
+RUN find /defaults -type f -exec \
+      sed -i \
+        -e 's|listen 80 |listen 8080 |g' \
+        -e 's|listen 80;|listen 8080;|g' \
+        -e 's|listen \[::\]:80 |listen [::]:8080 |g' \
+        -e 's|listen \[::\]:80;|listen [::]:8080;|g' \
+        -e 's|listen 443 |listen 8443 |g' \
+        -e 's|listen 443;|listen 8443;|g' \
+        -e 's|pid /run/nginx.pid|pid /tmp/nginx.pid|g' \
+        -e 's|pid /var/run/nginx.pid|pid /tmp/nginx.pid|g' \
+      {} + 2>/dev/null || true
+
 COPY --from=upstream /etc/cont-init.d             /etc/cont-init.d
 COPY --from=upstream /etc/nginx/nginx.conf        /etc/nginx/nginx.conf
 COPY --from=upstream /etc/nginx/conf.d            /etc/nginx/conf.d
-COPY --from=upstream /usr/local/bin/tpl           /usr/local/bin/tpl
+COPY --from=upstream /usr/bin/tpl           /usr/bin/tpl
 
 # Remap nginx from port 80 → 8080 in all configs
 RUN find /etc/nginx /defaults -name "*.conf" -exec \
@@ -42,7 +57,9 @@ RUN find /etc/nginx /defaults -name "*.conf" -exec \
         -e 's/listen \[::\]:443\b/listen [::]:8443/g' \
       {} + 2>/dev/null || true && \
     sed -i 's|pid /run/nginx.pid|pid /tmp/nginx.pid|g' \
-      /etc/nginx/nginx.conf 2>/dev/null || true
+      /etc/nginx/nginx.conf 2>/dev/null || true && \
+    # Remove 'user' directive — nginx fails with it when running as non-root
+    sed -i 's|^user .*;||g' /etc/nginx/nginx.conf 2>/dev/null || true
 
 # Pre-create writable directories with GID 0 / g=u for arbitrary UID injection
 RUN mkdir -p \
@@ -61,7 +78,7 @@ RUN mkdir -p \
       /var/log/nginx \
       /tmp/nginx \
       /etc/nginx \
-      /usr/local/bin/tpl && \
+      /usr/bin/tpl && \
     chmod -R g=u \
       /config \
       /defaults \
@@ -69,7 +86,7 @@ RUN mkdir -p \
       /var/cache/nginx \
       /var/log/nginx \
       /etc/nginx && \
-    chmod 0755 /usr/local/bin/tpl && \
+    chmod 0755 /usr/bin/tpl && \
     # Make cont-init.d scripts executable
     chmod -R +x /etc/cont-init.d/
 

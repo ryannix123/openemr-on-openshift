@@ -22,7 +22,7 @@ FROM quay.io/centos/centos:stream10
 USER root
 
 # Install Java runtime
-RUN dnf install -y --nogpgcheck java-21-openjdk-headless && \
+RUN dnf install -y java-21-openjdk-headless bind-utils iproute && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
@@ -30,10 +30,11 @@ RUN dnf install -y --nogpgcheck java-21-openjdk-headless && \
 COPY --from=upstream /usr/share/jitsi-videobridge  /usr/share/jitsi-videobridge
 COPY --from=upstream /defaults                      /defaults
 COPY --from=upstream /etc/cont-init.d               /etc/cont-init.d
-COPY --from=upstream /usr/local/bin/tpl             /usr/local/bin/tpl
+COPY --from=upstream /usr/bin/tpl             /usr/bin/tpl
 
-# Create jvb user at UID 1001 / GID 0 for NSS resolution
-RUN id jvb 2>/dev/null && userdel jvb || true && \
+# Create jitsi group (required by 10-config chown) and jvb user / GID 0 for NSS resolution
+RUN groupadd -f -g 1002 jitsi && \
+    id jvb 2>/dev/null && userdel jvb || true && \
     useradd -u 1001 -g 0 -d /home/jvb -s /sbin/nologin \
             -c "Jitsi Videobridge" jvb && \
     mkdir -p /home/jvb /config && \
@@ -42,13 +43,13 @@ RUN id jvb 2>/dev/null && userdel jvb || true && \
       /config \
       /defaults \
       /usr/share/jitsi-videobridge \
-      /usr/local/bin/tpl && \
+      /usr/bin/tpl && \
     chmod -R g=u \
       /home/jvb \
       /config \
       /defaults \
       /usr/share/jitsi-videobridge && \
-    chmod 0755 /usr/local/bin/tpl && \
+    chmod 0755 /usr/bin/tpl && \
     chmod -R +x /etc/cont-init.d/
 
 # NSS wrapper: copy /etc/passwd for runtime UID resolution

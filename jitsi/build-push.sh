@@ -197,7 +197,6 @@ for comp in "${COMPONENTS[@]}"; do
         --build-arg JITSI_VERSION="${VERSION}" \
         --no-cache \
         --pull=always \
-        --security-opt seccomp=unconfined \
         --format oci \
         -f "${CONTAINERFILE}" \
         -t "${PLATFORM_TAG}" \

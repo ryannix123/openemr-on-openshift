@@ -21,7 +21,7 @@ FROM quay.io/centos/centos:stream10
 USER root
 
 # Install Java runtime
-RUN dnf install -y --nogpgcheck java-21-openjdk-headless && \
+RUN dnf install -y java-21-openjdk-headless && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
@@ -29,10 +29,11 @@ RUN dnf install -y --nogpgcheck java-21-openjdk-headless && \
 COPY --from=upstream /usr/share/jicofo      /usr/share/jicofo
 COPY --from=upstream /defaults              /defaults
 COPY --from=upstream /etc/cont-init.d       /etc/cont-init.d
-COPY --from=upstream /usr/local/bin/tpl     /usr/local/bin/tpl
+COPY --from=upstream /usr/bin/tpl     /usr/bin/tpl
 
-# Create jicofo user at UID 1001 / GID 0 for NSS resolution
-RUN id jicofo 2>/dev/null && userdel jicofo || true && \
+# Create jitsi group (required by 10-config chown) and jicofo user / GID 0 for NSS resolution
+RUN groupadd -f -g 1002 jitsi && \
+    id jicofo 2>/dev/null && userdel jicofo || true && \
     useradd -u 1001 -g 0 -d /home/jicofo -s /sbin/nologin \
             -c "Jicofo Conference Focus" jicofo && \
     mkdir -p /home/jicofo /config && \
@@ -41,13 +42,13 @@ RUN id jicofo 2>/dev/null && userdel jicofo || true && \
       /config \
       /defaults \
       /usr/share/jicofo \
-      /usr/local/bin/tpl && \
+      /usr/bin/tpl && \
     chmod -R g=u \
       /home/jicofo \
       /config \
       /defaults \
       /usr/share/jicofo && \
-    chmod 0755 /usr/local/bin/tpl && \
+    chmod 0755 /usr/bin/tpl && \
     chmod -R +x /etc/cont-init.d/
 
 # NSS wrapper: copy /etc/passwd for runtime UID resolution

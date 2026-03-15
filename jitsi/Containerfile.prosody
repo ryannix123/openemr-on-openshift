@@ -22,8 +22,8 @@ USER root
 
 # Install prosody + dependencies from EPEL
 # lua-sec provides SSL, lua-socket provides networking, libevent for async I/O
-RUN dnf install -y --nogpgcheck epel-release && \
-    dnf install -y --nogpgcheck \
+RUN dnf install -y epel-release && \
+    dnf install -y \
       prosody \
       lua-socket \
       lua-sec \
@@ -34,12 +34,11 @@ RUN dnf install -y --nogpgcheck epel-release && \
     rm -rf /var/cache/dnf
 
 # Copy Jitsi-specific files from upstream
-COPY --from=upstream /etc/prosody          /etc/prosody
 COPY --from=upstream /usr/lib/prosody      /usr/lib/prosody
 COPY --from=upstream /prosody-plugins      /prosody-plugins
 COPY --from=upstream /defaults             /defaults
 COPY --from=upstream /etc/cont-init.d      /etc/cont-init.d
-COPY --from=upstream /usr/local/bin/tpl    /usr/local/bin/tpl
+COPY --from=upstream /usr/bin/tpl    /usr/bin/tpl
 
 # Create prosody user at UID 1001 / GID 0
 RUN id prosody 2>/dev/null && userdel prosody || true && \
@@ -59,7 +58,7 @@ RUN id prosody 2>/dev/null && userdel prosody || true && \
       /var/lib/prosody \
       /var/log/prosody \
       /var/run/prosody \
-      /usr/local/bin/tpl && \
+      /usr/bin/tpl && \
     chmod -R g=u \
       /config \
       /defaults \
@@ -68,7 +67,7 @@ RUN id prosody 2>/dev/null && userdel prosody || true && \
       /var/lib/prosody \
       /var/log/prosody \
       /var/run/prosody && \
-    chmod 0755 /usr/local/bin/tpl && \
+    chmod 0755 /usr/bin/tpl && \
     chmod -R +x /etc/cont-init.d/
 
 COPY openshift-entrypoint-prosody.sh /usr/local/bin/openshift-entrypoint.sh
