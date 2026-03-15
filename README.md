@@ -1,9 +1,5 @@
 # OpenEMR on OpenShift Developer Sandbox
 
-<p align="center">
-  <img src="https://www.open-emr.org/images/openemr-blue-logo.png" alt="OpenEMR Logo" width="300" />
-</p>
-
 [![OpenEMR Version](https://img.shields.io/badge/OpenEMR-8.0.0-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTE0IDJINmEyIDIgMCAwIDAtMiAydjE2YTIgMiAwIDAgMCAyIDJoMTJhMiAyIDAgMCAwIDItMlY4eiI+PC9wYXRoPjxwb2x5bGluZSBwb2ludHM9IjE0IDIgMTQgOCAyMCA4Ij48L3BvbHlsaW5lPjxsaW5lIHgxPSIxNiIgeTE9IjEzIiB4Mj0iOCIgeTI9IjEzIj48L2xpbmU+PGxpbmUgeDE9IjE2IiB5MT0iMTciIHgyPSI4IiB5Mj0iMTciPjwvbGluZT48cG9seWxpbmUgcG9pbnRzPSIxMCA5IDkgOSA4IDkiPjwvcG9seWxpbmU+PC9zdmc+)](https://www.open-emr.org/)
 [![PHP Version](https://img.shields.io/badge/PHP-8.5-777BB4?style=flat-square&logo=php&logoColor=white)](https://www.php.net/)
 [![MariaDB Version](https://img.shields.io/badge/MariaDB-11.8-003545?style=flat-square&logo=mariadb&logoColor=white)](https://mariadb.org/)
@@ -14,7 +10,49 @@
 [![ONC Certified](https://img.shields.io/badge/ONC-Certified-success?style=flat-square&logo=check-circle&logoColor=white)](https://chpl.healthit.gov/#/listing/10938)
 [![Build and Push OpenEMR](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml/badge.svg)](https://github.com/ryannix123/openemr-on-openshift/actions/workflows/build-image.yml)
 
+<p align="center">
+  <img src="https://www.open-emr.org/images/openemr-blue-logo.png" alt="OpenEMR Logo" width="300" />
+</p>
+
 Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift Developer Sandbox using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository.
+
+---
+
+## 🆓 Red Hat Developer Sandbox
+
+The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox) is a **free** OpenShift environment perfect for testing OpenEMR:
+
+- **Free tier** — No credit card required
+- **Generous resources** — 14 GB RAM, 40 GB storage, 3 CPU cores
+- **Latest OpenShift** — Always running a recent version (4.18+)
+- **Auto-hibernation** — Deployments scale to zero after 12 hours of inactivity
+
+### Waking Up Your Deployment
+
+When you return after the sandbox has hibernated, your pods will be scaled down. Run these commands to bring everything back up:
+
+```bash
+# Wake up all components (order matters — database first)
+oc scale statefulset/mariadb --replicas=1 -n openemr
+oc scale deployment/redis --replicas=1 -n openemr
+oc scale deployment/openemr --replicas=1 -n openemr
+
+# Watch pod status until all are Running
+oc get pods -n openemr -w
+```
+
+Wait until all pods show `Running` and `1/1` (or `2/2` if running with the Service Mesh sidecar). MariaDB will take the longest — OpenEMR won't connect until the database has fully started.
+
+```bash
+# Confirm the route is accessible
+oc get route openemr -n openemr
+```
+
+Your data persists in the PVCs — only the pods are stopped during hibernation.
+
+> **Tip**: Bookmark the OpenShift web console for your sandbox namespace. You can also resume deployments visually from **Workloads → Deployments** without needing the CLI.
+
+---
 
 ## Overview
 
@@ -306,37 +344,6 @@ The container exposes these endpoints:
 
 - `/health` - General health check (returns 200)
 - `/fpm-status` - PHP-FPM status page
-
-## Waking Up After Developer Sandbox Idling
-
-The OpenShift Developer Sandbox automatically idles deployments after a period of inactivity, scaling all pods to zero. To resume your OpenEMR deployment:
-
-### Scale Everything Back Up
-
-```bash
-# Wake up all components
-oc scale statefulset/mariadb --replicas=1 -n openemr
-oc scale deployment/redis --replicas=1 -n openemr
-oc scale deployment/openemr --replicas=1 -n openemr
-```
-
-### Wait for Pods to Become Ready
-
-```bash
-# Watch pod status
-oc get pods -n openemr -w
-```
-
-Wait until all pods show `Running` and `1/1` (or `2/2` if running with the Service Mesh sidecar). MariaDB will take the longest — it needs to complete its startup sequence before OpenEMR can connect.
-
-### Verify the Route
-
-```bash
-# Confirm the route is accessible
-oc get route openemr -n openemr
-```
-
-> **Tip**: Bookmark the OpenShift web console for your sandbox namespace. You can also resume deployments visually from **Workloads → Deployments** without needing the CLI.
 
 ## Troubleshooting
 
