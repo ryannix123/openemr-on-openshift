@@ -1,0 +1,92 @@
+# =============================================================================
+# Containerfile.prosody — Prosody XMPP Server
+# Multi-stage: upstream jitsi/prosody → CentOS Stream 10
+#
+# Replaces Debian + s6-overlay with CentOS Stream 10 + prosody from EPEL.
+# Jitsi-specific prosody plugins and config templates are COPY'd from upstream.
+# The 'tpl' config renderer (static Go binary) is COPY'd from upstream.
+# A simple bash entrypoint replaces s6.
+#
+# Maintainer: Ryan Nix <ryan.nix@gmail.com>
+# =============================================================================
+
+ARG JITSI_VERSION=stable
+
+# ── Stage 1: upstream source ─────────────────────────────────────────────────
+FROM docker.io/jitsi/prosody:${JITSI_VERSION} AS upstream
+
+# ── Stage 2: CentOS Stream 10 final image ────────────────────────────────────
+FROM quay.io/centos/centos:stream10
+
+USER root
+
+# Install prosody + dependencies from EPEL
+# lua-sec provides SSL, lua-socket provides networking, libevent for async I/O
+RUN dnf install -y epel-release && \
+    dnf install -y \
+      prosody \
+      lua-socket \
+      lua-sec \
+      libevent \
+      openssl \
+      ca-certificates && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Copy Jitsi-specific files from upstream
+COPY --from=upstream /usr/lib/prosody      /usr/lib/prosody
+COPY --from=upstream /prosody-plugins      /prosody-plugins
+COPY --from=upstream /defaults             /defaults
+COPY --from=upstream /etc/cont-init.d      /etc/cont-init.d
+COPY --from=upstream /usr/bin/tpl    /usr/bin/tpl
+
+# Create prosody user at UID 1001 / GID 0
+RUN id prosody 2>/dev/null && userdel prosody || true && \
+    useradd -u 1001 -g 0 -d /var/lib/prosody -s /sbin/nologin \
+            -c "Prosody XMPP Server" prosody && \
+    mkdir -p \
+      /config/conf.d \
+      /config/certs \
+      /var/lib/prosody \
+      /var/log/prosody \
+      /var/run/prosody && \
+    chown -R 1001:0 \
+      /config \
+      /defaults \
+      /etc/prosody \
+      /prosody-plugins \
+      /var/lib/prosody \
+      /var/log/prosody \
+      /var/run/prosody \
+      /usr/bin/tpl && \
+    chmod -R g=u \
+      /config \
+      /defaults \
+      /etc/prosody \
+      /prosody-plugins \
+      /var/lib/prosody \
+      /var/log/prosody \
+      /var/run/prosody && \
+    chmod 0755 /usr/bin/tpl && \
+    chmod -R +x /etc/cont-init.d/
+
+COPY openshift-entrypoint-prosody.sh /usr/local/bin/openshift-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/openshift-entrypoint.sh && \
+    chown 1001:0 /usr/local/bin/openshift-entrypoint.sh
+
+USER 1001:0
+
+EXPOSE 5222
+EXPOSE 5269
+EXPOSE 5280
+EXPOSE 5347
+
+ENTRYPOINT ["/usr/local/bin/openshift-entrypoint.sh"]
+
+LABEL org.opencontainers.image.title="jitsi-prosody-openshift" \
+      org.opencontainers.image.description="Prosody XMPP server on CentOS Stream 10, OpenShift restricted-v2 SCC compatible" \
+      org.opencontainers.image.url="https://quay.io/ryan_nix/jitsi-openshift" \
+      org.opencontainers.image.source="https://github.com/ryannix123/openemr-on-openshift" \
+      org.opencontainers.image.vendor="Community" \
+      io.openshift.expose-services="5222:xmpp,5269:xmpp-s2s,5280:bosh,5347:xmpp-component" \
+      maintainer="Ryan Nix <ryan.nix@gmail.com>"

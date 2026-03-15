@@ -1,0 +1,78 @@
+# =============================================================================
+# Containerfile.jicofo — JItsi COnference FOcus
+# Multi-stage: upstream jitsi/jicofo → CentOS Stream 10
+#
+# Replaces Debian + s6-overlay with CentOS Stream 10 + OpenJDK from dnf.
+# The jicofo jar and its dependencies are COPY'd from the upstream image.
+# Java jars are platform-independent so no binary compatibility issues.
+# A simple bash entrypoint replaces s6.
+#
+# Maintainer: Ryan Nix <ryan.nix@gmail.com>
+# =============================================================================
+
+ARG JITSI_VERSION=stable
+
+# ── Stage 1: upstream source ─────────────────────────────────────────────────
+FROM docker.io/jitsi/jicofo:${JITSI_VERSION} AS upstream
+
+# ── Stage 2: CentOS Stream 10 final image ────────────────────────────────────
+FROM quay.io/centos/centos:stream10
+
+USER root
+
+# Install Java runtime
+RUN dnf install -y java-21-openjdk-headless && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Copy jicofo application and config scaffolding from upstream
+COPY --from=upstream /usr/share/jicofo      /usr/share/jicofo
+COPY --from=upstream /defaults              /defaults
+COPY --from=upstream /etc/cont-init.d       /etc/cont-init.d
+COPY --from=upstream /usr/bin/tpl     /usr/bin/tpl
+
+# Create jitsi group (required by 10-config chown) and jicofo user / GID 0 for NSS resolution
+RUN groupadd -f -g 1002 jitsi && \
+    id jicofo 2>/dev/null && userdel jicofo || true && \
+    useradd -u 1001 -g 0 -d /home/jicofo -s /sbin/nologin \
+            -c "Jicofo Conference Focus" jicofo && \
+    mkdir -p /home/jicofo /config && \
+    chown -R 1001:0 \
+      /home/jicofo \
+      /config \
+      /defaults \
+      /usr/share/jicofo \
+      /usr/bin/tpl && \
+    chmod -R g=u \
+      /home/jicofo \
+      /config \
+      /defaults \
+      /usr/share/jicofo && \
+    chmod 0755 /usr/bin/tpl && \
+    chmod -R +x /etc/cont-init.d/
+
+# NSS wrapper: copy /etc/passwd for runtime UID resolution
+RUN cp /etc/passwd /etc/passwd.template && \
+    chown 1001:0 /etc/passwd.template && \
+    chmod g=u /etc/passwd.template
+
+COPY openshift-entrypoint-jicofo.sh /usr/local/bin/openshift-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/openshift-entrypoint.sh && \
+    chown 1001:0 /usr/local/bin/openshift-entrypoint.sh
+
+USER 1001:0
+
+ENV HOME=/home/jicofo
+ENV JAVA_SYS_PROPS="-Djava.io.tmpdir=/tmp -XX:-UsePerfData"
+
+EXPOSE 8888
+
+ENTRYPOINT ["/usr/local/bin/openshift-entrypoint.sh"]
+
+LABEL org.opencontainers.image.title="jitsi-jicofo-openshift" \
+      org.opencontainers.image.description="Jicofo on CentOS Stream 10, OpenShift restricted-v2 SCC compatible" \
+      org.opencontainers.image.url="https://quay.io/ryan_nix/jitsi-openshift" \
+      org.opencontainers.image.source="https://github.com/ryannix123/openemr-on-openshift" \
+      org.opencontainers.image.vendor="Community" \
+      io.openshift.expose-services="8888:http" \
+      maintainer="Ryan Nix <ryan.nix@gmail.com>"

@@ -1,0 +1,81 @@
+# =============================================================================
+# Containerfile.jvb — Jitsi Videobridge
+# Multi-stage: upstream jitsi/jvb → CentOS Stream 10
+#
+# Replaces Debian + s6-overlay with CentOS Stream 10 + OpenJDK from dnf.
+# The JVB jar and its dependencies are COPY'd from the upstream image.
+# Java jars are platform-independent so no binary compatibility issues.
+# A simple bash entrypoint replaces s6.
+# hostNetwork removed — UDP/10000 exposed via NodePort or LoadBalancer Service.
+#
+# Maintainer: Ryan Nix <ryan.nix@gmail.com>
+# =============================================================================
+
+ARG JITSI_VERSION=stable
+
+# ── Stage 1: upstream source ─────────────────────────────────────────────────
+FROM docker.io/jitsi/jvb:${JITSI_VERSION} AS upstream
+
+# ── Stage 2: CentOS Stream 10 final image ────────────────────────────────────
+FROM quay.io/centos/centos:stream10
+
+USER root
+
+# Install Java runtime
+RUN dnf install -y java-21-openjdk-headless bind-utils iproute && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Copy JVB application and config scaffolding from upstream
+COPY --from=upstream /usr/share/jitsi-videobridge  /usr/share/jitsi-videobridge
+COPY --from=upstream /defaults                      /defaults
+COPY --from=upstream /etc/cont-init.d               /etc/cont-init.d
+COPY --from=upstream /usr/bin/tpl             /usr/bin/tpl
+
+# Create jitsi group (required by 10-config chown) and jvb user / GID 0 for NSS resolution
+RUN groupadd -f -g 1002 jitsi && \
+    id jvb 2>/dev/null && userdel jvb || true && \
+    useradd -u 1001 -g 0 -d /home/jvb -s /sbin/nologin \
+            -c "Jitsi Videobridge" jvb && \
+    mkdir -p /home/jvb /config && \
+    chown -R 1001:0 \
+      /home/jvb \
+      /config \
+      /defaults \
+      /usr/share/jitsi-videobridge \
+      /usr/bin/tpl && \
+    chmod -R g=u \
+      /home/jvb \
+      /config \
+      /defaults \
+      /usr/share/jitsi-videobridge && \
+    chmod 0755 /usr/bin/tpl && \
+    chmod -R +x /etc/cont-init.d/
+
+# NSS wrapper: copy /etc/passwd for runtime UID resolution
+RUN cp /etc/passwd /etc/passwd.template && \
+    chown 1001:0 /etc/passwd.template && \
+    chmod g=u /etc/passwd.template
+
+COPY openshift-entrypoint-jvb.sh /usr/local/bin/openshift-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/openshift-entrypoint.sh && \
+    chown 1001:0 /usr/local/bin/openshift-entrypoint.sh
+
+USER 1001:0
+
+ENV HOME=/home/jvb
+ENV JAVA_SYS_PROPS="-Djava.io.tmpdir=/tmp -XX:-UsePerfData"
+
+EXPOSE 10000/udp
+EXPOSE 9090
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/openshift-entrypoint.sh"]
+
+LABEL org.opencontainers.image.title="jitsi-jvb-openshift" \
+      org.opencontainers.image.description="Jitsi Videobridge on CentOS Stream 10, OpenShift restricted-v2 SCC compatible" \
+      org.opencontainers.image.url="https://quay.io/ryan_nix/jitsi-openshift" \
+      org.opencontainers.image.source="https://github.com/ryannix123/openemr-on-openshift" \
+      org.opencontainers.image.vendor="Community" \
+      io.openshift.expose-services="10000/udp:jvb-media,9090:colibri-ws,8080:http" \
+      maintainer="Ryan Nix <ryan.nix@gmail.com>"
