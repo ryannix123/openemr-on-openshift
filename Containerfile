@@ -417,6 +417,16 @@ logfile_maxbytes=0
 loglevel=info
 pidfile=/run/supervisord.pid
 
+[supervisorctl]
+serverurl=unix:///run/supervisor.sock
+
+[unix_http_server]
+file=/run/supervisor.sock
+chmod=0700
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface
+
 [program:php-fpm]
 command=/usr/sbin/php-fpm --nodaemonize --fpm-config /etc/php-fpm.conf
 autostart=true
