@@ -26,7 +26,6 @@ NC='\033[0m'
 OPENEMR_IMAGE="quay.io/ryan_nix/openemr-openshift:latest"
 MARIADB_IMAGE="quay.io/fedora/mariadb-118:latest"
 REDIS_IMAGE="docker.io/redis:8-alpine"
-CQM_IMAGE="docker.io/openemr/oe-cqm-execution:latest"
 
 # ── Storage ──────────────────────────────────────────────────────────────────
 # Auto-detect the cluster's default StorageClass unless the caller sets
@@ -405,88 +404,6 @@ EOF
 }
 
 ##############################################################################
-# CQM Service Deployment (Clinical Quality Measures — Care Coordination)
-##############################################################################
-
-deploy_cqm() {
-    print_header "Deploying CQM Service"
-
-    print_info "Deploying CQM execution service..."
-    cat <<EOF | oc apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cqm-service
-  labels:
-    app: cqm-service
-    app.kubernetes.io/name: cqm-service
-    app.kubernetes.io/component: cqm
-    app.kubernetes.io/part-of: openemr
-    app.kubernetes.io/managed-by: kubectl
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: cqm-service
-  template:
-    metadata:
-      labels:
-        app: cqm-service
-        app.kubernetes.io/name: cqm-service
-        app.kubernetes.io/component: cqm
-        app.kubernetes.io/part-of: openemr
-    spec:
-      containers:
-      - name: cqm-service
-        image: $CQM_IMAGE
-        ports:
-        - containerPort: 6660
-          name: cqm
-        resources:
-          limits:
-            memory: 512Mi
-            cpu: 250m
-          requests:
-            memory: 128Mi
-            cpu: 50m
-        securityContext:
-          allowPrivilegeEscalation: false
-          runAsNonRoot: true
-          capabilities:
-            drop:
-            - ALL
-          seccompProfile:
-            type: RuntimeDefault
-EOF
-    print_success "CQM deployment created"
-
-    print_info "Creating CQM service..."
-    cat <<EOF | oc apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: cqm-service
-  labels:
-    app: cqm-service
-    app.kubernetes.io/name: cqm-service
-    app.kubernetes.io/component: cqm
-    app.kubernetes.io/part-of: openemr
-spec:
-  ports:
-  - port: 6660
-    targetPort: 6660
-    name: cqm
-  selector:
-    app: cqm-service
-  type: ClusterIP
-EOF
-    print_success "CQM service created"
-
-    wait_for_pod "app=cqm-service" 300
-    print_success "CQM service is ready"
-}
-
-##############################################################################
 # OpenEMR Deployment
 ##############################################################################
 
@@ -616,7 +533,7 @@ spec:
               name: mariadb-secret
               key: database-password
         - name: CQM_SERVICE_URL
-          value: "http://cqm-service:6660"
+          value: "http://localhost:6660"
         volumeMounts:
         - name: openemr-sites
           mountPath: /var/www/html/openemr/sites/default
@@ -798,10 +715,10 @@ cleanup() {
     print_header "Cleaning Up OpenEMR Deployment"
 
     print_info "Deleting deployments..."
-    oc delete deployment openemr redis mariadb cqm-service --ignore-not-found
+    oc delete deployment openemr redis mariadb --ignore-not-found
 
     print_info "Deleting services..."
-    oc delete service openemr redis mariadb cqm-service --ignore-not-found
+    oc delete service openemr redis mariadb --ignore-not-found
 
     print_info "Deleting routes..."
     oc delete route openemr --ignore-not-found
@@ -908,7 +825,6 @@ main() {
             detect_project
             deploy_mariadb
             deploy_redis
-            deploy_cqm
             deploy_openemr
             display_summary
             print_success "Deployment complete!"

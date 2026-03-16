@@ -39,6 +39,18 @@ RUN dnf install -y \
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
+# Install Node.js 22 + yarn in builder for CQM service dependency resolution
+RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
+    && dnf install -y nodejs \
+    && dnf clean all \
+    && npm install -g yarn --quiet
+
+# Clone and install oe-cqm-service (no public image exists — built from source)
+RUN git clone --depth 1 https://github.com/openemr/oe-cqm-service.git /opt/cqm-service \
+    && cd /opt/cqm-service \
+    && yarn install --frozen-lockfile --production \
+    && yarn cache clean
+
 # Clone OpenEMR from GitHub (shallow clone of the version tag)
 # Tag format: dots → underscores, prefixed with 'v'  (e.g. 8.0.0.1 → v8_0_0_1)
 WORKDIR /tmp
@@ -158,6 +170,9 @@ RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
 
 # Copy OpenEMR from builder stage
 COPY --from=builder /tmp/openemr ${OPENEMR_WEB_ROOT}
+
+# Copy CQM service from builder stage (built from source — no public image available)
+COPY --from=builder /opt/cqm-service /opt/cqm-service
 
 # Verify InstallerAuto.php was copied
 RUN test -f ${OPENEMR_WEB_ROOT}/contrib/util/installScripts/InstallerAuto.php \
@@ -425,6 +440,18 @@ stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
 stdout_events_enabled=true
 stderr_events_enabled=true
+
+[program:cqm]
+command=node /opt/cqm-service/server.js
+autostart=true
+autorestart=true
+priority=20
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+stdout_events_enabled=true
+stderr_events_enabled=true
 EOF
 
 # ============================================================================
@@ -454,6 +481,7 @@ RUN chgrp -R 0 \
     /tmp/sessions \
     /etc/nginx \
     /etc/php-fpm.d \
+    /opt/cqm-service \
     && chmod -R g=u \
     ${OPENEMR_WEB_ROOT} \
     /var/log/nginx \
@@ -463,7 +491,8 @@ RUN chgrp -R 0 \
     /run \
     /tmp/sessions \
     /etc/nginx \
-    /etc/php-fpm.d
+    /etc/php-fpm.d \
+    /opt/cqm-service
 
 # Make specific OpenEMR directories writable
 RUN chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents \
