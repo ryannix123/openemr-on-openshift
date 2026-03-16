@@ -48,7 +48,7 @@ RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
 # Clone and install oe-cqm-service (no public image exists — built from source)
 RUN git clone --depth 1 https://github.com/openemr/oe-cqm-service.git /opt/cqm-service \
     && cd /opt/cqm-service \
-    && yarn install --frozen-lockfile --production \
+    && yarn install --production --non-interactive \
     && yarn cache clean
 
 # Clone OpenEMR from GitHub (shallow clone of the version tag)
