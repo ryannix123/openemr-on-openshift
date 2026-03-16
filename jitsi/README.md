@@ -8,6 +8,8 @@ OpenShift-native Jitsi Meet — rebuilt from the ground up to run under the `res
 
 > **Part of the [openemr-on-openshift](https://github.com/ryannix123/openemr-on-openshift) project.**
 
+> ⚠️ **Deployment environment matters.** The OpenShift application layer (all four pods, Routes, Services) runs fully under `restricted-v2` SCC on any OpenShift cluster. However, **WebRTC media requires inbound UDP**, which is only achievable on clusters where you control the underlying network — bare metal on-premise, SNO home lab, or cloud clusters with cluster-admin access to Security Groups and LoadBalancer services. See [Where this works](#where-this-works) before deploying.
+
 ---
 
 ## Why a custom build?
@@ -45,6 +47,98 @@ This project solves that by rebasing all four Jitsi components onto **CentOS Str
 | **jitsi-prosody** | CentOS Stream 10 + prosody (EPEL) | XMPP server | 5222, 5269, 5280, 5347 |
 | **jitsi-jicofo** | CentOS Stream 10 + Java 21 | Conference focus / signaling | 8888 (internal) |
 | **jitsi-jvb** | CentOS Stream 10 + Java 21 | WebRTC media relay | 10000/UDP, 9090 |
+
+![Jitsi Meet running on OpenShift](images/jitsi.png)
+
+---
+
+## Where this works
+
+Jitsi's application layer is fully OpenShift-compatible. The constraint is the **WebRTC media plane**: Jitsi Videobridge (JVB) requires inbound UDP to deliver video and audio to clients. OpenShift Routes handle only HTTP/HTTPS — UDP cannot pass through them.
+
+| Deployment environment | Application layer | WebRTC media (UDP) | Recommended |
+|---|---|---|---|
+| **Bare metal on-premise (OCP)** | ✅ restricted-v2 SCC | ✅ Full control of firewall + NodePort | ✅ **Best fit** |
+| **SNO home lab** | ✅ restricted-v2 SCC | ✅ Open UDP 10000 on your router | ✅ **Best fit** |
+| **ROSA / ARO / cloud OCP** | ✅ restricted-v2 SCC | ⚠️ Requires cluster-admin to open Security Groups + LoadBalancer service | 🔧 Possible with cluster-admin |
+| **OpenShift Developer Sandbox** | ✅ restricted-v2 SCC | ❌ No NodePort/LB access, no Security Group control | ❌ Media plane blocked |
+
+### Why bare metal and on-premise are the natural home for this stack
+
+OpenShift on bare metal on-premise is a common pattern in latency-sensitive, UDP-heavy industries — financial services firms running real-time market data feeds over UDP, healthcare organizations requiring full data sovereignty, and research institutions with high-throughput data pipelines all operate this way. The same network control that enables UDP market feeds enables WebRTC media. If your OpenShift cluster can receive inbound UDP for other workloads, it can run Jitsi.
+
+Cloud providers abstract away the underlying network in ways that make inbound UDP difficult or impossible without elevated privileges. This is a fundamental property of managed cloud networking, not an OpenShift limitation.
+
+---
+
+## Network requirements
+
+These are the ports that must be reachable from the internet (or your user network) for Jitsi to function fully. **All application signaling runs over HTTPS/443 via OpenShift Routes** — only the JVB media port requires special handling.
+
+### Required inbound ports on worker nodes
+
+| Port | Protocol | Component | Purpose | How to expose on OpenShift |
+|---|---|---|---|---|
+| **443** | TCP | jitsi-meet, prosody (WSS) | Web UI, XMPP over WebSocket, all signaling | OpenShift Route (automatic) |
+| **10000** | UDP | jitsi-jvb | WebRTC media (audio/video) | `NodePort` or `LoadBalancer` Service |
+
+### Optional / advanced ports
+
+| Port | Protocol | Component | Purpose | Notes |
+|---|---|---|---|---|
+| **4443** | TCP | jitsi-jvb (TURN/TLS fallback) | TCP media fallback for clients that cannot do UDP | Only needed if deploying coturn |
+| **3478** | UDP | coturn | STUN/TURN relay | Only if self-hosting a TURN server |
+| **9090** | TCP | jitsi-jvb (Colibri) | JVB REST API + WebSocket transport | Internal only by default; expose via Route if using Colibri WS mode |
+| **5222** | TCP | jitsi-prosody | XMPP client connections | Internal cluster only — not exposed externally |
+
+### Firewall rules (bare metal / on-premise OCP)
+
+On a bare metal OpenShift cluster using `firewalld` on worker nodes, add:
+
+```bash
+# Open JVB media port — required for WebRTC
+firewall-cmd --permanent --add-port=10000/udp
+firewall-cmd --permanent --add-port=30000/udp  # if using NodePort 30000
+
+# Optional: TCP fallback
+firewall-cmd --permanent --add-port=4443/tcp
+
+firewall-cmd --reload
+```
+
+### AWS Security Group rules (ROSA / cloud OCP with cluster-admin)
+
+If deploying on ROSA or a cloud-hosted OpenShift cluster with cluster-admin access:
+
+1. Identify the Security Group attached to your worker nodes (typically named `rosa-<cluster>-worker` or `<cluster>-worker-sg`)
+2. Add an inbound rule:
+
+| Type | Protocol | Port range | Source |
+|---|---|---|---|
+| Custom UDP | UDP | 10000 | 0.0.0.0/0 |
+| Custom TCP | TCP | 4443 | 0.0.0.0/0 (optional, TCP fallback) |
+
+3. Change the JVB service type to `LoadBalancer` to get a stable inbound-capable public IP:
+
+```bash
+oc patch svc jitsi-jvb-udp -n <namespace> -p '{"spec":{"type":"LoadBalancer"}}'
+LB_IP=$(oc get svc jitsi-jvb-udp -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+oc set env deployment/jitsi-jvb JVB_ADVERTISE_IPS=$LB_IP DOCKER_HOST_ADDRESS=$LB_IP
+```
+
+> **Note:** `NodePort` alone is insufficient on ROSA — the NAT Gateway handles outbound traffic but does not forward arbitrary inbound UDP to worker nodes. A `LoadBalancer` service provisions an AWS Network Load Balancer (NLB) with a dedicated public endpoint that supports inbound UDP.
+
+### TURN server (coturn) — for restrictive client networks
+
+If your end users are behind corporate firewalls that block UDP 10000, deploy a coturn TURN server and configure JVB to use it:
+
+```bash
+# In your JVB deployment env
+JVB_STUN_SERVERS=turn.yourdomain.com:3478
+JVB_DISABLE_STUN=false
+```
+
+coturn itself requires a public IP with UDP 3478 and TCP 4443 open — the same network control requirement as JVB. On bare metal this is straightforward; on managed cloud it requires the same Security Group access.
 
 ---
 
@@ -159,6 +253,8 @@ All resources include `app.kubernetes.io/part-of: jitsi` so they appear grouped
 together in the OpenShift Developer topology view — the same way the OpenEMR
 stack groups its components. Connection arrows between components are drawn via
 `app.openshift.io/connects-to` annotations.
+
+![Jitsi components in the OpenShift Developer Console topology view](images/console.png)
 
 ---
 
@@ -306,14 +402,42 @@ oc patch deployment/jitsi-meet \
 
 ---
 
-## Known limitations
+## Known limitations and deployment guidance
 
-| Limitation | Context | Workaround |
+### The UDP boundary
+
+The single most important thing to understand about self-hosted Jitsi (and any WebRTC media server — Janus, mediasoup, BigBlueButton, coturn) is that **WebRTC media requires inbound UDP**. This is not a Jitsi limitation or an OpenShift limitation — it is a property of the WebRTC protocol itself.
+
+OpenShift Routes are an HTTP/HTTPS proxy. They cannot carry UDP traffic. This means:
+
+- **The OpenShift application layer works everywhere** — all four pods run cleanly under `restricted-v2` SCC on any OpenShift cluster
+- **WebRTC media only works where you control the network** — bare metal on-premise, SNO, or cloud clusters where cluster-admin can open Security Groups and provision LoadBalancer services
+
+Attempting to run JVB behind a NAT Gateway on a managed cloud cluster (ROSA, ARO, Developer Sandbox) without a LoadBalancer service results in the error: `No valid IP addresses available for harvesting` — JVB cannot bind to a routable IP because the pod's egress IP is a shared NAT address, not an inbound-capable public IP.
+
+### Colibri WebSocket transport (experimental)
+
+JVB supports sending media over WebSockets (WSS/443) instead of UDP — a mode intended for clients behind corporate firewalls that block UDP. This is configured via:
+
+```bash
+oc set env deployment/jitsi-jvb \
+  ENABLE_COLIBRI_WEBSOCKET=true \
+  JVB_WS_DOMAIN=<jvb-route-hostname> \
+  JVB_WS_TLS=true
+```
+
+However, in current JVB versions the public HTTP server that hosts the Colibri WebSocket endpoint requires additional configuration to bind correctly in a containerized environment. This mode also carries significant trade-offs: 20–50% higher bandwidth usage, higher CPU load on JVB, and worse quality under packet loss compared to native UDP. It is **not recommended for production telehealth use** where call quality is critical.
+
+### Summary table
+
+| Limitation | Affected environments | Workaround |
 |---|---|---|
-| WebRTC video requires external UDP | Developer Sandbox / ROSA — UDP NodePort not reachable externally | Deploy a coturn TURN server; set `JVB_STUN_SERVERS` |
+| WebRTC video requires inbound UDP | Developer Sandbox, ROSA/ARO without cluster-admin | Deploy on bare metal / SNO; or use LoadBalancer + Security Group with cluster-admin |
+| AWS NAT Gateway blocks inbound UDP | ROSA NodePort deployments | Use `LoadBalancer` service type to provision an NLB |
+| `oc get nodes` forbidden | Developer Sandbox, restricted namespaces | Use Downward API (`status.podIP`) for `LOCAL_ADDRESS` |
 | Apple Silicon cross-build failures | QEMU RPM transaction bugs on arm64 hosts | Build on x86_64 or use GitHub Actions |
-| JVB health probes disabled | UDP not reachable in managed clusters | Re-enable on SNO/bare-metal with open NodePort |
-| `apt-cache` stripped from init scripts | Debian-only command, not present on CentOS | Harmless — only used for version logging |
+| JVB health probes disabled | Managed clusters where UDP is unreachable | Re-enable on SNO/bare-metal with open NodePort |
+| `apt-cache` stripped from init scripts | All — Debian-only command, not present on CentOS | Harmless — only used for version logging |
 
 ---
 
