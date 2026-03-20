@@ -8,7 +8,8 @@
 FROM quay.io/centos/centos:stream9 AS builder
 
 # OpenEMR version — single source of truth for the entire build.
-# Override at build time:  --build-arg OPENEMR_VERSION=8.0.0.1
+# Override at build time:  --build-arg OPENEMR_VERSION=<version>
+# Tag format: dots → underscores, prefixed with 'v'  (e.g. 8.0.0.2 → v8_0_0_2)
 ARG OPENEMR_VERSION=8.0.0.1
 
 # Enable EPEL and CRB repositories for additional packages
