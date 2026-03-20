@@ -13,15 +13,13 @@ FROM quay.io/centos/centos:stream10 AS builder
 ARG OPENEMR_VERSION=8.0.0.1
 
 # Install all build dependencies in one layer.
-# EPEL must be installed via direct Fedora URL on EL10 (not the repo package).
-# CRB is enabled via 'crb install' on EL10, not dnf config-manager.
-# EL10 / DNF5 retains module stream support — Remi PHP still uses it.
+# EPEL must be installed via direct Fedora URL on EL10.
+# CRB enabled via 'crb install'. PHP 8.5 via 'dnf module switch-to' (DNF5/EL10).
 RUN dnf install -y \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm \
         https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
     && crb install \
-    && dnf module reset php -y \
-    && dnf module enable php:remi-8.5 -y \
+    && dnf module switch-to php:remi-8.5 -y \
     && dnf install -y \
         git curl unzip \
         php-cli php-json php-mbstring php-xml php-zip \
@@ -98,8 +96,9 @@ ENV OPENEMR_VERSION=${OPENEMR_VERSION} \
     NGINX_PORT=8080 \
     PHP_VERSION=8.5
 
-# Install ALL packages in a single layer — eliminates 6 intermediate layers.
-# EPEL via direct Fedora URL, CRB via 'crb install', Remi via module stream.
+# Install ALL runtime packages in a single layer — eliminates 6 intermediate layers.
+# EPEL via direct Fedora URL, CRB via 'crb install'.
+# PHP 8.5 via 'dnf module switch-to' — correct method for DNF5/EL10.
 # php-xmlrpc: removed from PHP 8.0+ core, unavailable on EL10.
 # wget: removed — curl is already present throughout.
 RUN dnf install -y \
@@ -107,8 +106,7 @@ RUN dnf install -y \
         https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
     && crb install \
     && dnf upgrade -y \
-    && dnf module reset php -y \
-    && dnf module enable php:remi-8.5 -y \
+    && dnf module switch-to php:remi-8.5 -y \
     && dnf install -y \
         nginx \
         # PHP Core
