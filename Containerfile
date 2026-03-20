@@ -1,49 +1,38 @@
-# OpenEMR Container - CentOS 9 Stream with Remi PHP 8.5
+# OpenEMR Container - CentOS Stream 10 with Remi PHP 8.5
 # Multi-stage build for optimized final image
-# Runs nginx + PHP-FPM in single container with supervisord
+# Runs nginx + PHP-FPM + CQM in single container with supervisord
 
 # ============================================================================
-# Stage 1: Builder - Download and prepare OpenEMR
+# Stage 1: Builder - Download and prepare OpenEMR + CQM service
 # ============================================================================
-FROM quay.io/centos/centos:stream9 AS builder
+FROM quay.io/centos/centos:stream10 AS builder
 
 # OpenEMR version — single source of truth for the entire build.
 # Override at build time:  --build-arg OPENEMR_VERSION=<version>
 # Tag format: dots → underscores, prefixed with 'v'  (e.g. 8.0.0.2 → v8_0_0_2)
 ARG OPENEMR_VERSION=8.0.0.1
 
-# Enable EPEL and CRB repositories for additional packages
+# Install all build dependencies in one layer:
+#   EPEL + CRB for extra packages, Remi for PHP 8.5, build tools
+# CentOS Stream 10 uses DNF5 — no module streams; use dnf config-manager --enable
 RUN dnf install -y epel-release \
-    && dnf config-manager --set-enabled crb \
-    && dnf clean all
-
-# Install Remi's repository for PHP 8.5
-RUN dnf install -y \
-    https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
-    && dnf clean all
-
-# Enable Remi's PHP 8.5 repository
-RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.5 -y
-
-# Install build dependencies and tools
-RUN dnf install -y \
-    git \
-    unzip \
-    php-cli \
-    php-json \
-    php-mbstring \
-    php-xml \
-    php-zip \
-    && dnf clean all
+    && dnf config-manager --enable crb \
+    && dnf install -y https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
+    && dnf config-manager --enable remi-php85 \
+    && dnf install -y \
+        git curl unzip \
+        php-cli php-json php-mbstring php-xml php-zip \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf /var/log/dnf*
 
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-# Install Node.js 22 + yarn in builder for CQM service dependency resolution
+# Install Node.js 22 + yarn for CQM dependency resolution
 RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
     && dnf install -y nodejs \
     && dnf clean all \
+    && rm -rf /var/cache/dnf \
     && npm install -g yarn --quiet
 
 # Clone and install oe-cqm-service (no public image exists — built from source)
@@ -86,13 +75,13 @@ RUN test -f /tmp/openemr/contrib/util/installScripts/InstallerAuto.php \
 # ============================================================================
 # Stage 2: Runtime - Build final container
 # ============================================================================
-FROM quay.io/centos/centos:stream9
+FROM quay.io/centos/centos:stream10
 
 # Re-declare ARG so it's available in this stage
 ARG OPENEMR_VERSION=8.0.0.1
 
 LABEL maintainer="Ryan Nix <ryan.nix@gmail.com>" \
-      description="OpenEMR on CentOS 9 Stream - OpenShift Ready" \
+      description="OpenEMR on CentOS Stream 10 - OpenShift Ready" \
       version="${OPENEMR_VERSION}" \
       io.k8s.description="OpenEMR Electronic Medical Records System" \
       io.openshift.tags="openemr,healthcare,php,medical" \
@@ -106,67 +95,42 @@ ENV OPENEMR_VERSION=${OPENEMR_VERSION} \
     NGINX_PORT=8080 \
     PHP_VERSION=8.5
 
-# Enable EPEL and CRB repositories
+# Install ALL packages in a single layer:
+#   - EPEL + CRB + upgrade + Remi PHP 8.5 repo setup
+#   - nginx, all PHP 8.5 extensions, supervisor, Node.js 22
+# CentOS Stream 10 uses DNF5 — no module streams; use dnf config-manager --enable
+# Note: php-xmlrpc removed from PHP 8.0+ core and unavailable on EL10
+# Note: wget removed — curl is already present and used throughout
 RUN dnf install -y epel-release \
-    && dnf config-manager --set-enabled crb \
-    && dnf clean all
-
-# Update all packages to get security patches
-RUN dnf upgrade -y && dnf clean all
-
-# Install Remi's repository for PHP 8.5
-RUN dnf install -y \
-    https://rpms.remirepo.net/enterprise/remi-release-9.rpm \
-    && dnf clean all
-
-# Enable Remi's PHP 8.5 repository and reset PHP module
-RUN dnf module reset php -y \
-    && dnf module enable php:remi-8.5 -y
-
-# Install nginx
-RUN dnf install -y nginx && dnf clean all
-
-# Install PHP 8.5 and all required modules for OpenEMR from Remi's repo
-RUN dnf install -y \
-    # PHP Core
-    php \
-    php-fpm \
-    php-cli \
-    php-common \
-    # Database
-    php-mysqlnd \
-    php-pdo \
-    # OpenEMR Required Extensions
-    php-gd \
-    php-xml \
-    php-mbstring \
-    php-json \
-    php-zip \
-    php-curl \
-    php-opcache \
-    php-ldap \
-    php-soap \
-    php-bcmath \
-    php-intl \
-    # OpenEMR Recommended Extensions
-    php-imap \
-    php-tidy \
-    php-xmlrpc \
-    php-sodium \
-    # Session handling
-    php-pecl-redis5 \
-    # Process management
-    supervisor \
-    # Utilities
-    unzip \
-    wget \
+    && dnf config-manager --enable crb \
+    && dnf upgrade -y \
+    && dnf install -y https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
+    && dnf config-manager --enable remi-php85 \
+    && dnf install -y \
+        nginx \
+        # PHP Core
+        php php-fpm php-cli php-common \
+        # Database
+        php-mysqlnd php-pdo \
+        # OpenEMR Required Extensions
+        php-gd php-xml php-mbstring php-json php-zip \
+        php-curl php-opcache php-ldap php-soap php-bcmath php-intl \
+        # OpenEMR Recommended Extensions
+        php-imap php-tidy php-sodium \
+        # Session handling
+        php-pecl-redis5 \
+        # Process management
+        supervisor \
+        # Utilities
+        unzip \
     && dnf clean all \
-    && rm -rf /var/cache/dnf
+    && rm -rf /var/cache/dnf /var/log/dnf* /tmp/dnf*
 
-# Install Node.js 22 (required for OpenEMR 8.x frontend build)
+# Install Node.js 22 (runtime for CQM service + OpenEMR frontend build)
 RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
     && dnf install -y nodejs \
     && dnf clean all \
+    && rm -rf /var/cache/dnf /var/log/dnf* \
     && node --version && npm --version
 
 # Copy OpenEMR from builder stage
@@ -179,11 +143,12 @@ COPY --from=builder /opt/cqm-service /opt/cqm-service
 RUN test -f ${OPENEMR_WEB_ROOT}/contrib/util/installScripts/InstallerAuto.php \
     && echo "✓ InstallerAuto.php present in final image"
 
-# Build OpenEMR frontend assets
+# Build OpenEMR frontend assets then purge all build tooling artifacts
 WORKDIR ${OPENEMR_WEB_ROOT}
 RUN npm install --legacy-peer-deps \
     && npm run build \
     && rm -rf node_modules \
+    && npm cache clean --force \
     && echo "✓ Frontend assets built successfully"
 
 # Preserve default site files for PVC-mounted deployments.
@@ -469,48 +434,25 @@ EOF
 # OpenShift Permissions and Security
 # ============================================================================
 
-# Create necessary directories with proper permissions
+# Create directories, set OpenShift-compatible permissions (arbitrary UID, GID 0),
+# and make required OpenEMR paths writable — all in one layer
 RUN mkdir -p \
-    /var/log/php-fpm \
-    /var/log/nginx \
-    /var/lib/nginx \
-    /var/lib/php/session \
-    /run/php-fpm \
-    /tmp/sessions \
-    ${OPENEMR_WEB_ROOT}/sites/default/documents \
-    && chmod -R 775 /tmp/sessions
-
-# OpenShift runs containers with arbitrary UIDs but always group 0 (root)
-# Need to give group 0 same permissions as owner
-RUN chgrp -R 0 \
-    ${OPENEMR_WEB_ROOT} \
-    /var/log/nginx \
-    /var/log/php-fpm \
-    /var/lib/nginx \
-    /var/lib/php \
-    /run \
-    /tmp/sessions \
-    /etc/nginx \
-    /etc/php-fpm.d \
-    /opt/cqm-service \
+        /var/log/php-fpm /var/log/nginx /var/lib/nginx /var/lib/php/session \
+        /run/php-fpm /tmp/sessions \
+        ${OPENEMR_WEB_ROOT}/sites/default/documents \
+        ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods \
+    && chmod -R 775 /tmp/sessions \
+    && chgrp -R 0 \
+        ${OPENEMR_WEB_ROOT} /var/log/nginx /var/log/php-fpm /var/lib/nginx \
+        /var/lib/php /run /tmp/sessions /etc/nginx /etc/php-fpm.d /opt/cqm-service \
     && chmod -R g=u \
-    ${OPENEMR_WEB_ROOT} \
-    /var/log/nginx \
-    /var/log/php-fpm \
-    /var/lib/nginx \
-    /var/lib/php \
-    /run \
-    /tmp/sessions \
-    /etc/nginx \
-    /etc/php-fpm.d \
-    /opt/cqm-service
-
-# Make specific OpenEMR directories writable
-RUN chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents \
-    && chmod -R 770 ${OPENEMR_WEB_ROOT}/sites \
-    && chmod -R 770 ${OPENEMR_WEB_ROOT}/interface/modules/zend_modules/config \
-    && mkdir -p ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods \
-    && chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc
+        ${OPENEMR_WEB_ROOT} /var/log/nginx /var/log/php-fpm /var/lib/nginx \
+        /var/lib/php /run /tmp/sessions /etc/nginx /etc/php-fpm.d /opt/cqm-service \
+    && chmod -R 770 \
+        ${OPENEMR_WEB_ROOT}/sites/default/documents \
+        ${OPENEMR_WEB_ROOT}/sites \
+        ${OPENEMR_WEB_ROOT}/interface/modules/zend_modules/config \
+        ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc
 
 # Create entrypoint script
 RUN cat > /entrypoint.sh <<'ENTRYPOINT'
