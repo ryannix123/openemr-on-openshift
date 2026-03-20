@@ -61,11 +61,12 @@ RUN composer install --no-dev --no-interaction --optimize-autoloader
 # Note: npm build skipped - OpenEMR handles frontend build on first run
 # This matches official OpenEMR Docker behavior and avoids build crashes
 
-# Remove unnecessary files to reduce image size
-# Keep composer vendor/ directory - it's required
-# Skip npm build - OpenEMR will build assets on first run
+# Remove unnecessary files to reduce image size.
+# Documentation (~598M) and swagger (~8.8M) are runtime dead weight.
+# Keep composer vendor/ — required. Keep contrib/util/installScripts/ — used by entrypoint.
 RUN cd /tmp/openemr && \
     rm -rf .git .github .travis* tests docker contrib/util/docker \
+        Documentation swagger \
     && find . -type f -name "*.md" -delete \
     && find . -type f -name "*.jar" -delete \
     && find . -type f -name "*.war" -delete
