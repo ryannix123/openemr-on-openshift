@@ -12,13 +12,16 @@ FROM quay.io/centos/centos:stream10 AS builder
 # Tag format: dots → underscores, prefixed with 'v'  (e.g. 8.0.0.2 → v8_0_0_2)
 ARG OPENEMR_VERSION=8.0.0.1
 
-# Install all build dependencies in one layer:
-#   EPEL + CRB for extra packages, Remi for PHP 8.5, build tools
-# CentOS Stream 10 uses DNF5 — no module streams; use dnf config-manager --enable
-RUN dnf install -y epel-release \
-    && dnf config-manager --enable crb \
-    && dnf install -y https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
-    && dnf config-manager --enable remi-php85 \
+# Install all build dependencies in one layer.
+# EPEL must be installed via direct Fedora URL on EL10 (not the repo package).
+# CRB is enabled via 'crb install' on EL10, not dnf config-manager.
+# EL10 / DNF5 retains module stream support — Remi PHP still uses it.
+RUN dnf install -y \
+        https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm \
+        https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
+    && crb install \
+    && dnf module reset php -y \
+    && dnf module enable php:remi-8.5 -y \
     && dnf install -y \
         git curl unzip \
         php-cli php-json php-mbstring php-xml php-zip \
@@ -95,17 +98,17 @@ ENV OPENEMR_VERSION=${OPENEMR_VERSION} \
     NGINX_PORT=8080 \
     PHP_VERSION=8.5
 
-# Install ALL packages in a single layer:
-#   - EPEL + CRB + upgrade + Remi PHP 8.5 repo setup
-#   - nginx, all PHP 8.5 extensions, supervisor, Node.js 22
-# CentOS Stream 10 uses DNF5 — no module streams; use dnf config-manager --enable
-# Note: php-xmlrpc removed from PHP 8.0+ core and unavailable on EL10
-# Note: wget removed — curl is already present and used throughout
-RUN dnf install -y epel-release \
-    && dnf config-manager --enable crb \
+# Install ALL packages in a single layer — eliminates 6 intermediate layers.
+# EPEL via direct Fedora URL, CRB via 'crb install', Remi via module stream.
+# php-xmlrpc: removed from PHP 8.0+ core, unavailable on EL10.
+# wget: removed — curl is already present throughout.
+RUN dnf install -y \
+        https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm \
+        https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
+    && crb install \
     && dnf upgrade -y \
-    && dnf install -y https://rpms.remirepo.net/enterprise/remi-release-10.rpm \
-    && dnf config-manager --enable remi-php85 \
+    && dnf module reset php -y \
+    && dnf module enable php:remi-8.5 -y \
     && dnf install -y \
         nginx \
         # PHP Core
@@ -143,7 +146,7 @@ COPY --from=builder /opt/cqm-service /opt/cqm-service
 RUN test -f ${OPENEMR_WEB_ROOT}/contrib/util/installScripts/InstallerAuto.php \
     && echo "✓ InstallerAuto.php present in final image"
 
-# Build OpenEMR frontend assets then purge all build tooling artifacts
+# Build OpenEMR frontend assets then purge all npm artifacts
 WORKDIR ${OPENEMR_WEB_ROOT}
 RUN npm install --legacy-peer-deps \
     && npm run build \
