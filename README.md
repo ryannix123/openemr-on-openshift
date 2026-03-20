@@ -14,7 +14,7 @@
   <img src="https://www.open-emr.org/images/openemr-blue-logo.png" alt="OpenEMR Logo" width="300" />
 </p>
 
-Production-ready deployment of OpenEMR 8.0.0 on Red Hat OpenShift Developer Sandbox using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository.
+Production-ready deployment of OpenEMR 8.0.x on Red Hat OpenShift Developer Sandbox using a custom CentOS 10 Stream container with PHP 8.5 from Remi's repository.
 
 ---
 
@@ -24,7 +24,7 @@ The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox)
 
 - **Free tier** — No credit card required
 - **Generous resources** — 14 GB RAM, 40 GB storage, 3 CPU cores
-- **Latest OpenShift** — Always running a recent version (4.18+)
+- **Latest OpenShift** — Always running a recent version (4.21+) based on Kubernetes 1.34.4
 - **Auto-hibernation** — Deployments scale to zero after 12 hours of inactivity
 
 ### Waking Up Your Deployment
@@ -62,8 +62,8 @@ This project provides a complete containerized deployment of OpenEMR (Open-sourc
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
-| **OpenEMR** | 8.0.0 | Electronic Medical Records System |
-| **PHP** | 8.5 | Runtime (Remi's Repository) |
+| **OpenEMR** | 8.0.x | Electronic Medical Records System |
+| **PHP** | 8.5.x | Runtime (Remi's Repository) |
 | **MariaDB** | 11.8 | Database Backend |
 | **Redis** | 8 Alpine | Session Storage & Cache |
 | **nginx** | 1.26 | Web Server |
@@ -214,7 +214,7 @@ cd openemr-openshift
 If you want to build your own container:
 
 ```bash
-# Build the container (creates both :latest and :8.0.0 tags)
+# Build the container (creates both :latest and :8.0.x tags)
 podman build -t quay.io/ryan_nix/openemr-openshift:latest .
 
 # Push to Quay.io
