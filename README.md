@@ -29,17 +29,17 @@ The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox)
 
 ### Waking Up Your Deployment
 
-When you return after the sandbox has hibernated, your pods will be scaled down. Run these commands to bring everything back up:
+When you return after the sandbox has hibernated, your pods will be scaled down. Run this command to bring everything back up:
 
 ```bash
-# Wake up all components (order matters — database first)
-oc scale statefulset/mariadb --replicas=1 -n openemr
-oc scale deployment/redis --replicas=1 -n openemr
-oc scale deployment/openemr --replicas=1 -n openemr
+# Scale all deployments back to 1 replica
+oc scale deployment --all --replicas=1
 
-# Watch pod status until all are Running
-oc get pods -n openemr -w
+# Or specify your namespace explicitly
+oc scale deployment --all --replicas=1 -n $(oc project -q)
 ```
+
+Your data persists in the PVCs — only the pods are stopped during hibernation.
 
 Wait until all pods show `Running` and `1/1` (or `2/2` if running with the Service Mesh sidecar). MariaDB will take the longest — OpenEMR won't connect until the database has fully started.
 
