@@ -1,0 +1,156 @@
+# MongoDB Standalone Deployment for OpenShift (Single-Node Replica Set)
+#
+# ℹ️  NOTE: This file is for REFERENCE ONLY.
+#     The deploy.sh script creates these resources automatically with a generated password.
+#     You don't need to apply this file manually unless doing a custom deployment.
+#
+# For manual deployment without deploy.sh:
+#   1. Create credentials secret:
+#      oc create secret generic mongodb-secret \
+#        --from-literal=MONGODB_INITDB_ROOT_USERNAME=admin \
+#        --from-literal=MONGODB_INITDB_ROOT_PASSWORD=<your-secure-password>
+#   2. Create keyFile secret (required for replica set auth):
+#      openssl rand -base64 756 | tr -d '\n' > /tmp/mongodb-keyfile
+#      oc create secret generic mongodb-keyfile --from-file=keyfile=/tmp/mongodb-keyfile
+#      rm /tmp/mongodb-keyfile
+#   3. Apply this file: oc apply -f mongodb-standalone.yaml
+#   4. Wait for pod to be ready, then initiate the replica set:
+#      oc exec deployment/mongodb -- mongosh "mongodb://admin:<password>@localhost:27017/admin" \
+#        --eval 'rs.initiate({_id:"rs0", members:[{_id:0, host:"mongodb.<your-namespace>.svc.cluster.local:27017"}]})'
+#
+# The deploy.sh script does all of this automatically:
+#   ./deploy.sh
+---
+# MongoDB PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongodb-data
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# MongoDB Deployment
+# Uses the official MongoDB Community Server UBI image for OpenShift compatibility.
+# Runs as a single-node replica set to enable oplog for Rocket.Chat real-time events.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  labels:
+    app: mongodb
+    app.kubernetes.io/name: mongodb
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  strategy:
+    type: Recreate # Required for RWO volumes
+  template:
+    metadata:
+      labels:
+        app: mongodb
+        app.kubernetes.io/name: mongodb
+    spec:
+      # No securityContext specified - let OpenShift assign appropriate values
+      initContainers:
+      # OpenShift runs containers with a random UID and secret volume mounts
+      # don't reliably enforce defaultMode. MongoDB requires keyFile perms <= 0400.
+      # This init container copies the keyfile to an emptyDir with correct perms.
+      - name: keyfile-fix
+        image: mongodb/mongodb-community-server:8.2.5-ubi9
+        command: [ "sh", "-c", "cp /etc/mongodb-secret/keyfile /etc/mongodb/keyfile && chmod 0400 /etc/mongodb/keyfile" ]
+        volumeMounts:
+        - name: mongodb-keyfile-secret
+          mountPath: /etc/mongodb-secret
+          readOnly: true
+        - name: mongodb-keyfile
+          mountPath: /etc/mongodb
+      containers:
+      - name: mongodb
+        image: mongodb/mongodb-community-server:8.2.5-ubi9
+        args: [ "mongod", "--replSet", "rs0", "--bind_ip_all", "--keyFile", "/etc/mongodb/keyfile" ]
+        ports:
+        - containerPort: 27017
+          name: mongodb
+        env:
+        - name: MONGODB_INITDB_ROOT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: mongodb-secret
+              key: MONGODB_INITDB_ROOT_USERNAME
+        - name: MONGODB_INITDB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mongodb-secret
+              key: MONGODB_INITDB_ROOT_PASSWORD
+        volumeMounts:
+        - name: mongodb-data
+          mountPath: /data/db
+        - name: mongodb-keyfile
+          mountPath: /etc/mongodb
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        # startupProbe gates liveness/readiness until MongoDB is fully
+        # initialised — prevents kill loops on slow first-run init.
+        startupProbe:
+          exec:
+            command:
+            - mongosh
+            - --eval
+            - "db.adminCommand('ping')"
+          failureThreshold: 30
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - mongosh
+            - --eval
+            - "db.adminCommand('ping')"
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - mongosh
+            - --eval
+            - "db.adminCommand('ping')"
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: mongodb-data
+        persistentVolumeClaim:
+          claimName: mongodb-data
+      - name: mongodb-keyfile-secret
+        secret:
+          secretName: mongodb-keyfile
+      - name: mongodb-keyfile
+        emptyDir: {}
+---
+# MongoDB Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  labels:
+    app: mongodb
+    app.kubernetes.io/name: mongodb
+spec:
+  ports:
+  - port: 27017
+    targetPort: 27017
+    name: mongodb
+  selector:
+    app: mongodb
+  type: ClusterIP

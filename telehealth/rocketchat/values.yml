@@ -1,0 +1,88 @@
+# RocketChat Helm values for OpenShift with external MongoDB
+#
+# ℹ️  NOTE: This file is for REFERENCE ONLY.
+#     The deploy.sh script handles all configuration automatically via --set flags.
+#     You don't need to edit this file unless you want to do a manual deployment.
+#
+# For manual deployment without deploy.sh:
+#   1. Replace <your-password> with a secure password
+#   2. Replace <your-namespace> with your OpenShift project/namespace
+#   3. Run: helm install rocketchat ./rocketchat -f values.yml
+#
+# The deploy.sh script auto-detects the hostname:
+#   ./deploy.sh                     # auto-detect
+#   ./deploy.sh --host custom.host  # explicit override
+
+# Ingress configuration
+# Disabled — deploy.sh creates an OpenShift Route explicitly via oc create route,
+# which is more reliable than depending on Ingress-to-Route auto-conversion.
+ingress:
+  enabled: false
+
+# Disable built-in Bitnami MongoDB - we deploy MongoDB separately
+# Required because:
+#   1. Bitnami discontinued MongoDB images (no MongoDB 8.2+ available)
+#   2. RocketChat 8.x requires MongoDB 8.2+
+#   3. Bitnami chart has hardcoded security contexts incompatible with OpenShift
+mongodb:
+  enabled: false
+
+# Disable microservices mode — run monolithic (single pod handles everything).
+# Microservices split (ddp-streamer, presence, authorization, account, NATS)
+# is only needed for large-scale deployments with 200+ concurrent users.
+microservices:
+  enabled: false
+nats:
+  enabled: false
+
+# External MongoDB connection strings
+# deploy.sh generates these automatically with the correct password and namespace
+externalMongodbUrl: "mongodb://admin:<your-password>@mongodb.<your-namespace>.svc.cluster.local:27017/rocketchat?authSource=admin&replicaSet=rs0"
+externalMongodbOplogUrl: "mongodb://admin:<your-password>@mongodb.<your-namespace>.svc.cluster.local:27017/local?authSource=admin&replicaSet=rs0"
+
+# Let OpenShift handle security contexts
+# These empty objects prevent the chart from setting any security context,
+# allowing OpenShift to assign UIDs from the project's range
+podSecurityContext: {}
+containerSecurityContext: {}
+securityContext: {}
+
+serviceAccount:
+  create: true
+
+# ---------------------------------------------------------------------------
+# Probe configuration — prevents pod restarts during heavy first-run setup
+# (admin registration, MongoDB index creation, migrations).
+#
+# The startup-aware liveness probe gives RocketChat a generous window to
+# finish initialisation before health checks start enforcing.
+# ---------------------------------------------------------------------------
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 120
+  periodSeconds: 15
+  timeoutSeconds: 10
+  failureThreshold: 6
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+# Resource limits appropriate for Developer Sandbox
+# See README for production sizing guidance
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "2Gi"
+    cpu: "1000m"

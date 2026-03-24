@@ -1,639 +1,482 @@
-# Rocket.Chat
+# 🚀 Rocket.Chat on OpenShift — Zero Privilege Deployment
 
-[Rocket.Chat](https://rocket.chat/) is free, unlimited and open source. Replace email, HipChat & Slack with the ultimate team chat software solution.
+[![OpenShift](https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift)](https://www.redhat.com/en/technologies/cloud-computing/openshift)
+[![Rocket.Chat](https://img.shields.io/badge/Rocket.Chat-8.x-red?logo=rocketdotchat&logoColor=white)](https://rocket.chat)
+[![SCC](https://img.shields.io/badge/SCC-restricted-brightgreen)](https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html)
+[![MongoDB](https://img.shields.io/badge/MongoDB-8.2-47A248?logo=mongodb&logoColor=white)](https://www.mongodb.com)
+[![Node.js](https://img.shields.io/badge/Node.js-22.x-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![Helm](https://img.shields.io/badge/Helm-Chart-0F1689?logo=helm&logoColor=white)](https://helm.sh)
 
-> **WARNING**: Upgrading to chart version 5.4.3 or higher might require extra steps to successfully update MongoDB and Rocket.Chat. See [Upgrading to 5.4.3](#to-543) for more details.
+> **Deploy Rocket.Chat on OpenShift without ANY elevated privileges.** No `anyuid`. No `privileged`. Just pure, security-hardened container goodness designed for multi-tenancy.
 
-## Introduction
+---
 
-This chart bootstraps a [Rocket.Chat](https://rocket.chat/) Deployment on a [Kubernetes](https://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager. It provisions a fully featured Rocket.Chat installation.
+## 🆓 Red Hat Developer Sandbox
 
-In addition, this chart supports scaling of Rocket.Chat for increased server capacity and high availability (requires enterprise license).  For more information on Rocket.Chat and its capabilities, see its [documentation](https://rocket.chat/docs/).
+The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox) is a **free** OpenShift environment perfect for testing Rocket.Chat:
 
-## Prerequisites Details
+- **Free tier** — No credit card required
+- **Generous resources** — 14 GB RAM, 40 GB storage, 3 CPU cores
+- **Latest OpenShift** — Always running a recent version (4.18+)
+- **Auto-hibernation** — Deployments scale to zero after 12 hours of inactivity
 
-The chart has an optional dependency on the [MongoDB](https://github.com/bitnami/charts/tree/master/bitnami/mongodb) chart.
-By default, the MongoDB chart requires PV support on underlying infrastructure (may be disabled).
+### Waking Up Your Deployment
 
-## Installing the Chart
+When you return after the sandbox has hibernated, your pods will be scaled down. Run this command to bring everything back up:
 
-To install the chart with the release name `rocketchat`:
+```bash
+# Option 1: Use the deploy script
+./deploy.sh wakeup
 
-```console
-$ helm install rocketchat rocketchat/rocketchat --set mongodb.auth.passwords={rocketchatPassword},mongodb.auth.rootPassword=rocketchatRootPassword
+# Option 2: Manual commands (MongoDB must start first)
+oc scale deployment mongodb --replicas=1
+oc rollout status deployment/mongodb
+oc scale deployment --all --replicas=1
 ```
 
-If you got a registration token for [Rocket.Chat Cloud](https://cloud.rocket.chat), you can also include it: 
-```console
-$ helm install rocketchat rocketchat/rocketchat --set mongodb.auth.passwords={rocketchatPassword},mongodb.auth.rootPassword=rocketchatRootPassword,registrationToken=<paste the token here>
+Your data persists in the PVCs — only the pods are stopped during hibernation. Give Rocket.Chat a minute or two to reconnect to MongoDB after scaling up.
+
+---
+
+## ⚠️ Important: MongoDB Changes
+
+> **January 2025 Update**: Bitnami has discontinued MongoDB images following the VMware/Broadcom acquisition. Rocket.Chat 8.x requires MongoDB 8.2+, which is no longer available from Bitnami. This deployment uses the official MongoDB Community Server image deployed separately from the Helm chart.
+
+---
+
+## ✨ Features
+
+- ✅ Rocket.Chat 8.x with Node.js 22 + Meteor 3.0
+- ✅ Runs as non-root (OpenShift restricted SCC compatible)
+- ✅ Official MongoDB Community Server 8.2 (UBI9-based) with single-node replica set
+- ✅ Helm chart with automatic SCC patching
+- ✅ **Auto-detected hostname** — no manual route configuration needed
+- ✅ Persistent storage for MongoDB data
+- ✅ Auto-generated secure MongoDB credentials
+- ✅ Real-time messaging via MongoDB change streams
+- ✅ Startup-aware health probes — no restarts during first-run setup
+- ✅ Optional admin pre-configuration — skip the setup wizard entirely
+- ✅ Works on Developer Sandbox (free tier!)
+
+---
+
+## 🚀 Quick Start
+
+### Option 1: Developer Sandbox (Easiest)
+
+Perfect for testing or personal use on the [free Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox):
+
+```bash
+# Clone the repo
+git clone https://github.com/ryannix123/rocketchat-on-openshift.git
+cd rocketchat-on-openshift
+
+# Login to your sandbox
+oc login --token=YOUR_TOKEN --server=https://api.sandbox.openshiftapps.com:6443
+
+# Deploy! 🎉  (hostname is auto-detected)
+./deploy.sh
+
+# Or skip the setup wizard by pre-configuring an admin user and its password
+./deploy.sh --admin-user admin --admin-pass 'MyP@ss1234567!'
 ```
 
-Usage of `Values.yaml` file is recommended over using command line arguments `--set`. You must set at least the database password and root password in the values file.
+The script auto-detects your namespace and apps domain, builds the route hostname, and saves all credentials (MongoDB + admin) to `rocketchat-credentials.txt`.
+
+> **Override the hostname** if you need a custom name:
+> ```bash
+> ./deploy.sh --host my-chat.apps.sandbox-m2.ll9k.p1.openshiftapps.com
+> ```
+
+### Option 2: Full OpenShift Cluster
+
+For production or self-managed clusters:
+
+```bash
+# Create namespace
+oc new-project rocketchat
+
+# Deploy — hostname is auto-detected from cluster config
+./deploy.sh
+
+# Or deploy with admin pre-configured
+./deploy.sh --admin-user admin --admin-pass 'MyP@ss1234567!'
+```
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     OpenShift Route                         │
+│                  (TLS edge termination)                     │
+│          auto-detected: <release>-<ns>.<apps-domain>        │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ :443 → :3000
+┌─────────────────────────▼───────────────────────────────────┐
+│                   Rocket.Chat Pod                           │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │           Node.js 22 + Meteor 3.0                    │   │
+│  │                   (port 3000)                        │   │
+│  │                                                      │   │
+│  │   • Web interface                                    │   │
+│  │   • REST API                                         │   │
+│  │   • Real-time messaging (WebSocket)                  │   │
+│  │   • File uploads                                     │   │
+│  │   • /health endpoint for probes                      │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          │ :27017
+┌─────────────────────────▼───────────────────────────────────┐
+│                    MongoDB Pod                              │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │        MongoDB Community Server 8.2 (UBI9)           │  │
+│  │     mongodb/mongodb-community-server:8.2-ubi9        │  │
+│  │          Single-node replica set (rs0)               │  │
+│  │          Change streams for real-time events          │  │
+│  └─────────────────────────┬────────────────────────────┘  │
+│                            │                               │
+│  ┌─────────────────────────▼────────────────────────────┐  │
+│  │           Database PVC (10Gi RWO)                    │  │
+│  │   /data/db                                           │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📁 Files
+
+| File | Description |
+|------|-------------|
+| `deploy.sh` | Main deployment script (deploy, cleanup, wakeup) |
+| `mongodb-standalone.yaml` | MongoDB manifest (reference — deploy.sh creates resources directly) |
+| `values.yml` | Rocket.Chat Helm values (reference — deploy.sh passes values via --set) |
+
+> **Note:** The `deploy.sh` script handles all configuration automatically. The YAML files are provided for reference and manual deployments.
+
+---
+
+## ⚙️ Configuration
+
+### Hostname Auto-Detection
+
+The deploy script resolves the route hostname automatically using three strategies (in order):
+
+1. **Cluster ingress config** — `oc get ingresses.config/cluster` (works on full clusters)
+2. **API server URL** — infers `apps.<cluster>` from `api.<cluster>` (works on Developer Sandbox)
+3. **Existing routes** — parses the domain from any route already in the namespace
+
+The resulting hostname follows the pattern: `rocketchat-<namespace>.<apps-domain>`
+
+Override with `--host` if you need a custom name.
+
+### Admin Setup (Skip the Wizard)
+
+By default, Rocket.Chat shows a 4-step setup wizard on first launch. You can skip it entirely by passing `--admin-user` to the deploy script, which pre-configures the admin account and marks setup as complete:
+
+```bash
+# Auto-generate a password (saved to rocketchat-credentials.txt)
+./deploy.sh --admin-user admin --admin-email admin@example.com
+
+# Or provide your own password (must meet Rocket.Chat complexity requirements)
+./deploy.sh --admin-user admin --admin-pass 'MySecureP@ss123!' --admin-email admin@example.com
+```
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--admin-user` | No | — | Admin username; enables wizard skip when set |
+| `--admin-pass` | No | (generated) | Admin password; auto-generated if omitted |
+| `--admin-email` | No | `admin@example.com` | Admin email address |
+
+When `--admin-user` is provided, the script injects these environment variables into the Rocket.Chat pod:
+
+| Env Var | Purpose |
+|---------|---------|
+| `ADMIN_USERNAME` | Creates the admin account |
+| `ADMIN_PASS` | Sets the admin password |
+| `ADMIN_EMAIL` | Sets the admin email |
+| `OVERWRITE_SETTING_Show_Setup_Wizard` | Set to `completed` to skip the wizard |
+
+> **Password complexity**: Rocket.Chat requires at least 14 characters with uppercase, lowercase, number, and symbol. The auto-generated password meets these requirements. If you provide your own, make sure it does too — otherwise the admin account won't be created and you'll see the wizard anyway.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MONGO_URL` | (auto-configured) | MongoDB connection string |
+| `MONGO_OPLOG_URL` | (auto-configured) | MongoDB oplog URL for real-time |
+| `ROOT_URL` | (auto-detected) | External URL for Rocket.Chat |
+| `PORT` | `3000` | Application port |
+| `ADMIN_USERNAME` | — | Admin user (set via `--admin-user`) |
+| `ADMIN_PASS` | — | Admin password (set via `--admin-pass`) |
+| `ADMIN_EMAIL` | — | Admin email (set via `--admin-email`) |
+
+### Persistent Volumes
+
+| PVC | Size | Purpose |
+|-----|------|---------|
+| `mongodb-data` | 10Gi | MongoDB data storage |
+
+### Health Probes
+
+The deployment uses tuned health probes to prevent pod restarts during Rocket.Chat's first-run setup (admin registration, index creation, migrations):
+
+| Probe | Path | Initial Delay | Period | Timeout | Failure Threshold |
+|-------|------|---------------|--------|---------|-------------------|
+| Liveness | `/health` | 120s | 15s | 10s | 6 |
+| Readiness | `/health` | 30s | 10s | 5s | 6 |
+
+MongoDB uses a `startupProbe` (30 attempts × 5s = 150s window) that gates liveness/readiness checks until the database is fully initialised.
+
+### MongoDB & Change Streams
+
+MongoDB runs as a single-node replica set (`rs0`) to enable change streams for real-time events. The deploy script automatically initializes the replica set, configures keyFile authentication, and injects the `MONGO_OPLOG_URL` environment variable.
+
+> **Note:** The Rocket.Chat admin panel may show "oplog Disabled" — this is a **cosmetic label** from before Meteor 3.0. Rocket.Chat 8.x uses MongoDB change streams (via the replica set) instead of direct oplog tailing. Real-time messaging works correctly.
+
+### Helm Values
+
+The deploy script patches the official Rocket.Chat Helm chart to work with OpenShift's restricted SCC by removing hardcoded `runAsUser: 999` and `fsGroup: 999` values.
+
+Key values passed to Helm:
 
 ```yaml
 mongodb:
-  auth:
-    passwords:
-      - rocketchat
-    rootPassword: rocketchatroot
-```
-
-Now use the following command to deploy
-```shell
-helm install rocketchat -f Values.yaml rocketchat/rocketchat
-```
-
-> Starting chart version 5.4.3, due to mongodb dependency, username, password and database entries must be arrays of the same length. Rocket.Chat will use the first entries of those arrays for its own use. `mongodb.auth.usernames` array defaults to `{rocketchat}` and `mongodb.auth.databases` array defaults to `{rocketchat}`
-
-## Uninstalling the Chart
-
-To uninstall/delete the `rocketchat` deployment:
-
-```console
-$ helm delete rocketchat
-```
-
-## Configuration
-
-The following table lists the configurable parameters of the Rocket.Chat chart and their default values.
-
-| Parameter                              | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Default                            |
-|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------|
-| `image.repository`                     | Image repository                                                                                                                                                                                                                                                                                                                                                                                                                                               | `registry.rocket.chat/rocketchat/rocket.chat` |
-| `image.tag`                            | Image tag                                                                                                                                                                                                                                                                                                                                                                                                                                                      | `3.18.3`                           |
-| `image.pullPolicy`                     | Image pull policy                                                                                                                                                                                                                                                                                                                                                                                                                                              | `IfNotPresent`                     |
-| `host`                                 | Hostname for Rocket.Chat. Also used for ingress (if enabled)                                                                                                                                                                                                                                                                                                                                                                                                   | `""`                               |
-| `replicaCount`                         | Number of replicas to run                                                                                                                                                                                                                                                                                                                                                                                                                                      | `1`                                |
-| `smtp.enabled`                         | Enable SMTP for sending mails                                                                                                                                                                                                                                                                                                                                                                                                                                  | `false`                            |
-| `smtp.existingSecret`                  | Use existing secret for SMTP account                                                                                                                                                                                                                                                                                                                                                                                                                           | `""`                               |
-| `smtp.username`                        | Username of the SMTP account                                                                                                                                                                                                                                                                                                                                                                                                                                   | `""`                               |
-| `smtp.password`                        | Password of the SMTP account                                                                                                                                                                                                                                                                                                                                                                                                                                   | `""`                               |
-| `smtp.host`                            | Hostname of the SMTP server                                                                                                                                                                                                                                                                                                                                                                                                                                    | `""`                               |
-| `smtp.port`                            | Port of the SMTP server                                                                                                                                                                                                                                                                                                                                                                                                                                        | `587`                              |
-| `extraEnv`                             | Extra environment variables for Rocket.Chat. Used with `tpl` function, so this needs to be a string                                                                                                                                                                                                                                                                                                                                                            | `""`                               |
-| `extraSecret`                             | An already existing secret to be used by chat deployment. It needs to be a string                                                                                                                                                                                                                                                                                                                                                            | `""`                               |
-| `extraVolumes`                         | Extra volumes allowing inclusion of certificates or any sort of file that might be required (see bellow)                                                                                                                                                                                                                                                                                                                                                       | `[]`                               |
-| `extraVolumeMounts`                    | Where the aforementioned extra volumes should be mounted inside the container                                                                                                                                                                                                                                                                                                                                                                                  | `[]`                               |
-| `podAntiAffinity`                      | Pod anti-affinity can prevent the scheduler from placing RocketChat replicas on the same node. The default value "soft" means that the scheduler should *prefer* to not schedule two replica pods onto the same node but no guarantee is provided. The value "hard" means that the scheduler is *required* to not schedule two replica pods onto the same node. The value "" will disable pod anti-affinity so that no anti-affinity rules will be configured. | `""`                               |
-| `podAntiAffinityTopologyKey`           | If anti-affinity is enabled sets the topologyKey to use for anti-affinity. This can be changed to, for example `failure-domain.beta.kubernetes.io/zone`                                                                                                                                                                                                                                                                                                        | `kubernetes.io/hostname`           |
-| `affinity`                             | Assign custom affinity rules to the RocketChat instance https://kubernetes.io/docs/concepts/configuration/assign-pod-node/                                                                                                                                                                                                                                                                                                                                     | `{}`                               |
-| `minAvailable`                         | Minimum number / percentage of pods that should remain scheduled                                                                                                                                                                                                                                                                                                                                                                                               | `1`                                |
-| `existingMongodbSecret`                | An already existing secret containing MongoDB Connection URL                                                                                                                                                                                                                                                                                                                                                                                                   | `""`                               |
-| `externalMongodbUrl`                   | MongoDB URL if using an externally provisioned MongoDB                                                                                                                                                                                                                                                                                                                                                                                                         | `""`                               |
-| `mongodb.enabled`                      | Enable or disable MongoDB dependency. Refer to the [stable/mongodb docs](https://github.com/bitnami/charts/tree/master/bitnami/mongodb#configuration) for more information                                                                                                                                                                                                                                                                                     | `true`                             |
-| `mongodb.serviceMonitor.enabled` | Enable mongodb service monitor or service with scrape annotation | `true` |
-| `persistence.enabled`                  | Enable persistence using a PVC. This is not necessary if you're using the default [GridFS](https://rocket.chat/docs/administrator-guides/file-upload/) file storage                                                                                                                                                                                                                                                                          | `false`                            |
-| `persistence.storageClass`             | Storage class of the PVC to use                                                                                                                                                                                                                                                                                                                                                                                                                                | `""`                               |
-| `persistence.accessMode`               | Access mode of the PVC                                                                                                                                                                                                                                                                                                                                                                                                                                         | `ReadWriteOnce`                    |
-| `persistence.size`                     | Size of the PVC                                                                                                                                                                                                                                                                                                                                                                                                                                                | `8Gi`                              |
-| `persistence.existingClaim`            | An Existing PVC name for rocketchat volume                                                                                                                                                                                                                                                                                                                                                                                                                     | `""`                               |
-| `resources`                            | Pod resource requests and limits                                                                                                                                                                                                                                                                                                                                                                                                                               | `{}`                               |
-| `securityContext.enabled`              | Enable security context for the pod                                                                                                                                                                                                                                                                                                                                                                                                                            | `true`                             |
-| `securityContext.runAsUser`            | User to run the pod as                                                                                                                                                                                                                                                                                                                                                                                                                                         | `999`                              |
-| `securityContext.fsGroup`              | fs group to use for the pod                                                                                                                                                                                                                                                                                                                                                                                                                                    | `999`                              |
-| `serviceAccount.create`                | Specifies whether a ServiceAccount should be created                                                                                                                                                                                                                                                                                                                                                                                                           | `true`                             |
-| `serviceAccount.name`                  | Name of the ServiceAccount to use. If not set and create is true, a name is generated using the fullname template                                                                                                                                                                                                                                                                                                                                              | `""`                               |
-| `ingress.enabled`                      | If `true`, an ingress is created                                                                                                                                                                                                                                                                                                                                                                                                                               | `false`                            |
-| `ingress.pathType`                     | Sets the value for pathType for the created Ingress resource                                                                                                                                                                                                                                                                                                                                                                                                   | `Prefix`                           |
-| `ingress.annotations`                  | Annotations for the ingress                                                                                                                                                                                                                                                                                                                                                                                                                                    | `{}`                               |
-| `ingress.path`                         | Path of the ingress                                                                                                                                                                                                                                                                                                                                                                                                                                            | `/`                                |
-| `ingress.tls`                          | A list of [IngressTLS](https://kubernetes.io/docs/reference/kubernetes-api/service-resources/ingress-v1/#IngressSpec) items                                                                                                                                                                                                                                                                                                                                    | `[]`                               |
-| `license`                              | Contents of the Enterprise License file, if applicable                                                                                                                                                                                                                                                                                                                                                                                                         | `""`                               |
-| `prometheusScraping.enabled`           | Turn on and off /metrics endpoint for Prometheus scraping                                                                                                                                                                                                                                                                                                                                                                                                      | `false`                            |
-| `prometheusScraping.port`              | Port to use for the metrics for Prometheus to scrap on                                                                                                                                                                                                                                                                                                                                                                                                         | `9458`                             |
-| `prometheusScraping.msPort`           | Port to use for microservices metrics                                                                                                                                                                                                                                                                                                                                                                                                                          | `9458`                             |
-| `podMonitor.enabled`                   | Create podMonitor resource(s) for scraping metrics using PrometheusOperator (prometheusScraping should be enabled)                                                                                                                                                                                                                                                                                                                                             | `false`                            |
-| `podMonitor.interval`                  | The interval at which metrics should be scraped                                                                                                                                                                                                                                                                                                                                                                                                                | `30s`                              |
-| `serviceMonitor.enabled`               | Create ServiceMonitor resource(s) for scraping metrics using PrometheusOperator (prometheusScraping should be enabled)                                                                                                                                                                                                                                                                                                                                         | `false`                            |
-| `serviceMonitor.intervals`              | The intervals at which metrics should be scraped                                                                                                                                                                                                                                                                                                                                                                                                                | `[30s]`                              |
-| `serviceMonitor.ports`                  | The port names at which container exposes Prometheus metrics                                                                                                                                                                                                                                                                                                                                                                                                    | `[metrics]`                          |
-| `serviceMonitor.interval`              | deprecated, use `serviceMonitor.intervals` instead | `30s`                              |
-| `serviceMonitor.port`                  | deprecated, use `serviceMonitor.ports` instead | `metrics`                          |
-| `livenessProbe.enabled`                | Turn on and off liveness probe                                                                                                                                                                                                                                                                                                                                                                                                                                 | `true`                             |
-| `livenessProbe.initialDelaySeconds`    | Delay before liveness probe is initiated                                                                                                                                                                                                                                                                                                                                                                                                                       | `60`                               |
-| `livenessProbe.periodSeconds`          | How often to perform the probe                                                                                                                                                                                                                                                                                                                                                                                                                                 | `15`                               |
-| `livenessProbe.timeoutSeconds`         | When the probe times out                                                                                                                                                                                                                                                                                                                                                                                                                                       | `5`                                |
-| `livenessProbe.failureThreshold`       | Minimum consecutive failures for the probe                                                                                                                                                                                                                                                                                                                                                                                                                     | `3`                                |
-| `livenessProbe.successThreshold`       | Minimum consecutive successes for the probe                                                                                                                                                                                                                                                                                                                                                                                                                    | `1`                                |
-| `scheduling.tolerations`               | Tolerations for all pods (propagated via YAML anchors to global and nats) | `[]`  |
-| `scheduling.nodeSelector`              | Node selector for all pods (propagated via YAML anchors) | `{}`  |
-| `scheduling.affinity`                  | Affinity rules for all pods (propagated via YAML anchors) | `{}`  |
-| `global.tolerations`                   | common tolerations for all pods (rocket.chat and all microservices) | []  |
-| `global.annotations`                   | common annotations for all pods (rocket.chat and all microservices) | {}  |
-| `global.nodeSelector`                  | common nodeSelector for all pods (rocket.chat and all microservices) | {}  |
-| `global.affinity`                      | common affinity for all pods (rocket.chat and all microservices) | {}  |
-| `tolerations`                          | tolerations for main rocket.chat pods (the `meteor` service) | [] |
-| `microservices.enabled`                | Use [microservices](https://docs.rocket.chat/quick-start/installing-and-updating/micro-services-setup-beta) architecture                                                                                                                                                                                                                                                                                                                                       | `false`                            |
-| `microservices.streamHub.enabled`      | Enable the Stream Hub microservice. **DEPRECATED**: Disabled by default for versions >= 7.7.3. Cannot be enabled for versions >= 8.0.0 (completely removed). For versions < 7.7.3, enabled by default unless explicitly disabled. When enabled, automatically sets `DB_WATCHERS=true` on all services. | `false` (auto-enabled for < 7.7.3) |
-| `microservices.presence.replicas`      | Number of replicas to run for the presence service                                                                                                                                                                                                                                                                                                                                                                                                                | `1`                                |
-| `microservices.ddpStreamer.replicas`   | Number of replicas to run for the ddpStreamer service                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `1`                                |
-| `microservices.account.replicas`      | Number of replicas to run for the account service                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `1`                                |
-| `microservices.authorization.replicas` | Number of replicas to run for the authorization service                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `1`                                |
-| `microservices.presence.tolerations`      | Pod tolerations | [] |
-| `microservices.ddpStreamer.tolerations`   | Pod tolerations | [] |
-| `microservices.streamHub.tolerations`     | Pod tolerations | [] |
-| `microservices.account.tolerations`      | Pod tolerations | [] |
-| `microservices.authorization.tolerations` | Pod tolerations | [] |
-| `microservices.presence.annotations`      | Pod annotations | {} |
-| `microservices.ddpStreamer.annotations`   | Pod annotations | {} |
-| `microservices.streamHub.annotations`     | Pod annotations | {} |
-| `microservices.account.annotations`      | Pod annotations | {} |
-| `microservices.authorization.annotations` | Pod annotations | {} |
-| `microservices.presence.nodeSelector`     | nodeSelector for the Pod | {} |
-| `microservices.ddpStreamer.nodeSelector`  | nodeSelector for the Pod | {} |
-| `microservices.streamHub.nodeSelector`    | nodeSelector for the Pod | {} |
-| `microservices.account.nodeSelector`     | nodeSelector for the Pod | {} |
-| `microservices.authorization.nodeSelector`| nodeSelector for the Pod | {} |
-| `microservices.presence.affinity`      | Pod affinity | {} |
-| `microservices.ddpStreamer.affinity`   | Pod affinity | {} |
-| `microservices.streamHub.affinity`     | Pod affinity | {} |
-| `microservices.account.affinity`      | Pod affinity | {} |
-| `microservices.authorization.affinity` | Pod affinity | {} |
-| `readinessProbe.enabled`               | affinity for the Pod | [] |                                                                                                                                                                                                                                                                                                                                                                                                                             | `true`                             |
-| `readinessProbe.initialDelaySeconds`   | Delay before readiness probe is initiated                                                                                                                                                                                                                                                                                                                                                                                                                      | `10`                               |
-| `readinessProbe.periodSeconds`         | How often to perform the probe                                                                                                                                                                                                                                                                                                                                                                                                                                 | `15`                               |
-| `readinessProbe.timeoutSeconds`        | When the probe times out                                                                                                                                                                                                                                                                                                                                                                                                                                       | `5`                                |
-| `readinessProbe.failureThreshold`      | Minimum consecutive failures for the probe                                                                                                                                                                                                                                                                                                                                                                                                                     | `3`                                |
-| `readinessProbe.successThreshold`      | Minimum consecutive successes for the probe                                                                                                                                                                                                                                                                                                                                                                                                                    | `1`                                |
-| `registrationToken`                    | Registration Token for [Rocket.Chat Cloud ](https://cloud.rocket.chat)                                                                                                                                                                                                                                                                                                                                                                                         | ""                                 |
-| `service.annotations`                  | Annotations for the Rocket.Chat service                                                                                                                                                                                                                                                                                                                                                                                                                        | `{}`                               |
-| `service.labels`                       | Additional labels for the Rocket.Chat service                                                                                                                                                                                                                                                                                                                                                                                                                  | `{}`                               |
-| `service.type`                         | The service type to use                                                                                                                                                                                                                                                                                                                                                                                                                                        | `ClusterIP`                        |
-| `service.port`                         | The service port                                                                                                                                                                                                                                                                                                                                                                                                                                               | `80`                               |
-| `service.nodePort`                     | The node port used if the service is of type `NodePort`                                                                                                                                                                                                                                                                                                                                                                                                        | `""`                               |
-| `podDisruptionBudget.enabled`          | Enable or disable PDB for RC deployment                                                                                                                                                                                                                                                                                                                                                                                                                        | `true`                             |
-| `podLabels`                            | Additional pod labels for the Rocket.Chat pods                                                                                                                                                                                                                                                                                                                                                                                                                 | `{}`                               |
-| `podAnnotations`                       | Additional pod annotations for the Rocket.Chat pods                                                                                                                                                                                                                                                                                                                                                                                                            | `{}`                               |
-| `federation.enabled`                   | Enable Rocket.Chat federation (through matrix) 
-| `federation.host`                      | FQDN for your matrix instance
-| `federation.image.repository`          | Image repository to use for federation image, defaults to `matrixdotorg`
-| `federation.image.registry`            | Image registry to use for federation image, defaults to `docker.io`
-| `federation.image.tag`                 | Image tag to use for federation image, defaults to `latest`
-| `federation.persistence.enabled`       | Enabling persistence for matrix pod
-| `postgresql.enabled`                   | Enabling postgresql for matrix (synapse), defaults to false, if false, uses sqlite
-| `nats.nats.image`          | NATS container image (includes tag)                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `nats:2.12-alpine`                                |
-| `nats.cluster.replicas`          | Number of replicas to run NATS                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `2`                                |
-| `nats.exporter.enabled`          | Enable or Disable metrics collection for NATS                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `true`                                |
-| `nats.enabled` | Enable or disabled NATS deploy, if using microservices and this is nil them it will be deployed | true for microservices (default), false for monolith |
-| `nats.existingSecret.name` | Existing Secret name for an external NATS server | empty |
-| `nats.existingSecret.key` | Existing Secret key for the `nats.existingSecret.name` containing the connection string | empty |
-| `nats.podMonitor.enabled` | Enable NATS PodMonitor or service with scrape annotation | `true` |
-| `nats.tolerations` | Tolerations for NATS pods (must be set explicitly for tainted nodes) | `[]` |
-| `nats.nodeSelector` | Node selector for NATS pods (must be set explicitly) | `{}` |
-| `nats.natsbox.tolerations` | Tolerations for NATS box pods (must be set explicitly for tainted nodes) | `[]` |
-| `nats.natsbox.nodeSelector` | Node selector for NATS box pods (must be set explicitly) | `{}` |
-Specify each parameter using the `--set key=value[,key=value]` argument to `helm install`.
-
-Alternatively, a YAML file that specifies the values for the parameters can be provided while installing the chart. For example,
-
-```bash
-$ helm install rocketchat -f values.yaml rocketchat/rocketchat
-```
-
-## Node Scheduling (Taints/Tolerations)
-
-When deploying to nodes with taints, you need to configure tolerations for all components. This chart uses YAML anchors in the `global` block to simplify configuration - set tolerations once and they automatically apply to all components including NATS.
-
-### Recommended: Edit values.yaml
-
-The simplest approach is to copy `values.yaml` and uncomment the tolerations section:
-
-```bash
-# Copy the values file
-cp rocketchat/values.yaml my-values.yaml
-
-# Edit my-values.yaml - uncomment the tolerations in the global section
-
-# Install with your values
-helm install rocketchat rocketchat/rocketchat -f my-values.yaml
-```
-
-In `values.yaml`, uncomment these lines in the `global` section:
-
-```yaml
-global:
-  ## Uncomment for tainted nodes:
-  tolerations: &tolerations
-    - key: "dedicated"
-      operator: "Equal"
-      value: "rocketchat"
-      effect: "NoSchedule"
-  nodeSelector: &nodeSelector
-    dedicated: rocketchat
-  ##
-  ## Comment out or remove these defaults:
-  # tolerations: &tolerations []
-  # nodeSelector: &nodeSelector {}
-```
-
-The YAML anchors (`&tolerations`, `&nodeSelector`) propagate to NATS and other subcharts automatically.
-
-> **Important:** YAML anchors only work within a single values file. If you use multiple `-f` files or `--set`, you must specify values for each component separately.
-
-### Using --set (Alternative)
-
-If you cannot use a values file, you can set tolerations individually:
-
-```bash
-helm install rocketchat ./rocketchat \
-  --set 'global.tolerations[0].key=dedicated' \
-  --set 'global.tolerations[0].operator=Equal' \
-  --set 'global.tolerations[0].value=rocketchat' \
-  --set 'global.tolerations[0].effect=NoSchedule' \
-  --set 'nats.tolerations[0].key=dedicated' \
-  --set 'nats.tolerations[0].operator=Equal' \
-  --set 'nats.tolerations[0].value=rocketchat' \
-  --set 'nats.tolerations[0].effect=NoSchedule' \
-  --set 'nats.natsbox.tolerations[0].key=dedicated' \
-  --set 'nats.natsbox.tolerations[0].operator=Equal' \
-  --set 'nats.natsbox.tolerations[0].value=rocketchat' \
-  --set 'nats.natsbox.tolerations[0].effect=NoSchedule'
-```
-
-> **Note:** The values file approach is much simpler. Use `--set` only when you cannot use a values file.
-
-### External Nats
-
-This chart supports using an existing NATS server instead of deploying a new one. This is useful when you have a shared NATS infrastructure or want to manage NATS separately from your Rocket.Chat deployment.
-
-#### Using an External NATS Server
-
-To use an external NATS server, you need to:
-
-1. **Create a Kubernetes Secret** containing the NATS connection string:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: my-nats-secret
-  namespace: rocketchat
-type: Opaque
-data:
-  # Base64 encoded NATS connection string
-  # Example: nats://user:password@nats-server:4222
-  nats-url: bmF0czovL3VzZXI6cGFzc3dvcmRAbmF0cy1zZXJ2ZXI6NDIyMg==
-```
-
-2. **Configure the chart** to use the external NATS server:
-
-```yaml
-# Disable the built-in NATS deployment
-nats:
-  enabled: false
-  existingSecret:
-    name: "my-nats-secret"
-    key: "nats-url"
-```
-
-### Stream Hub Microservice Deprecation
-
-> **IMPORTANT**: As of Rocket.Chat version 7.7.3, the Stream Hub microservice is deprecated and disabled by default. As of version 8.0.0, it has been completely removed.
-
-The Stream Hub microservice (`microservices.streamHub`) is being phased out:
-
-- **Versions < 7.7.3**: Stream Hub is automatically enabled when using microservices architecture (unless explicitly disabled)
-- **Versions >= 7.7.3 and < 8.0.0**: Stream Hub is disabled by default and should not be used for new deployments
-- **Versions >= 8.0.0**: Stream Hub is completely removed and cannot be enabled (will always be disabled regardless of configuration)
-
-If you need to enable Stream Hub for older versions (< 8.0.0) or backward compatibility, set:
-
-```yaml
+  enabled: false          # Using external MongoDB
 microservices:
-  enabled: true
-  streamHub:
-    enabled: true
+  enabled: false          # Monolithic mode (single pod)
+nats:
+  enabled: false          # Not needed without microservices
+externalMongodbUrl: mongodb://admin:<password>@mongodb:27017/rocketchat?authSource=admin&replicaSet=rs0
+host: <auto-detected>
 ```
 
-**Note**: When Stream Hub is enabled, the `DB_WATCHERS=true` environment variable is automatically set on all Rocket.Chat services to support database change stream watching.
+---
 
-### Database Setup
-
-Rocket.Chat uses a MongoDB instance to presist its data.
-By default, the [MongoDB](https://github.com/bitnami/charts/tree/master/bitnami/mongodb) chart is deployed and a single MongoDB instance is created as the primary in a replicaset.  
-Please refer to this (MongoDB) chart for additional MongoDB configuration options.
-If you are using chart defaults, make sure to set at least the `mongodb.auth.rootPassword` and `mongodb.auth.passwords` values. 
-
-#### Using an External Database
-
-This chart supports using an existing MongoDB instance. Use the `` configuration options and disable MongoDB with `--set mongodb.enabled=false`
-
-### Configuring Additional Environment Variables
-
-```yaml
-extraEnv: |
-  - name: MONGO_OPTIONS
-    value: '{"ssl": "true"}'
-```
-### Specifying aditional volumes
-
-Sometimes, it's needed to include extra sets of files by means of exposing 
-them to the container as a mountpoint. The most common use case is the 
-inclusion of SSL CA certificates. 
-
-```yaml
-extraVolumes: 
-  - name: etc-certs
-    hostPath:
-    - path: /etc/ssl/certs
-      type: Directory
-extraVolumeMounts: 
-  - mountPath: /etc/ssl/certs
-    name: etc-certs   
-    readOnly: true
-```
-
-### Increasing Server Capacity and HA Setup
-
-To increase the capacity of the server, you can scale up the number of Rocket.Chat server instances across available computing resources in your cluster, for example,
+## 🔧 Management Commands
 
 ```bash
-$ kubectl scale --replicas=3 deployment/rocketchat
+# View MongoDB credentials
+cat rocketchat-credentials.txt
+
+# Or retrieve from secret
+oc get secret mongodb-secret -o jsonpath='{.data.MONGODB_INITDB_ROOT_PASSWORD}' | base64 -d
+
+# Check Rocket.Chat logs
+oc logs deployment/rocketchat-rocketchat -f
+
+# Check MongoDB logs
+oc logs deployment/mongodb -f
+
+# Access MongoDB shell
+oc exec -it deployment/mongodb -- mongosh "mongodb://admin:$(oc get secret mongodb-secret -o jsonpath='{.data.MONGODB_INITDB_ROOT_PASSWORD}' | base64 -d)@localhost:27017/admin"
+
+# Test MongoDB connection
+oc exec deployment/mongodb -- mongosh "mongodb://admin:<password>@localhost:27017/admin" --eval "db.runCommand({ping:1})"
+
+# Get route URL
+oc get route rocketchat -o jsonpath='{.spec.host}'
+
+# Wake up after hibernation
+./deploy.sh wakeup
+
+# Cleanup (removes everything including data)
+./deploy.sh cleanup
 ```
 
-By default, this chart creates one MongoDB instance as a Primary in a replicaset.  This is the minimum requirement to run Rocket.Chat 1.x+.    You can also scale up the capacity and availability of the MongoDB cluster independently.  Please see the [MongoDB chart](https://github.com/bitnami/charts/tree/master/bitnami/mongodb) for configuration information.
+---
 
-For information on running Rocket.Chat in scaled configurations, see the [documentation](https://rocket.chat/docs/installation/docker-containers/high-availability-install/#guide-to-install-rocketchat-as-ha-with-mongodb-replicaset-as-backend) for more details.
+## 🔒 Security
 
-### Adding tolerations, annotations, nodeSelector and affinity
+This deployment runs under OpenShift's most restrictive security policy:
 
-To add common tolerations, annotations, nodeSelector and affinity to all deployments
-```yaml
-global:
-  tolerations:
-    - # here
-  annotations:
-      # here
-  nodeSelector:
-      # here
-      # kubernetes.io/arch: amd64
-  affinity:
-#   nodeAffinity:
-#     requiredDuringSchedulingIgnoredDuringExecution:
-#       nodeSelectorTerms:
-#       - matchExpressions:
-#         - key: kubernetes.io/arch
-#           operator: In
-#           values:
-#           - amd64
+| Security Feature | Status |
+|------------------|--------|
+| Runs as non-root | ✅ |
+| Random UID from namespace range | ✅ |
+| All capabilities dropped | ✅ |
+| No privilege escalation | ✅ |
+| Seccomp profile enforced | ✅ |
+| Works on Developer Sandbox | ✅ |
+
+Verify your deployment:
+
+```bash
+# Check SCC assignment (should show "restricted" or "restricted-v2")
+oc get pod -l app.kubernetes.io/name=rocketchat -o jsonpath='{.items[*].metadata.annotations.openshift\.io/scc}'
+
+# Verify non-root UID
+oc exec deployment/rocketchat-rocketchat -- id
 ```
 
-Override tolerations or annotations for each microservice by adding to respective block's configuration. For example to override the global tolerations and annotations for ddp-streamer pods,
-```yaml
-microservices:
-  ddpStreamer:
-    tolerations:
-      - # add here
-    annotations:
-        # add here
-  nodeSelector:
-      # here
-      # kubernetes.io/arch: amd64
-  affinity:
-#   nodeAffinity:
-#     requiredDuringSchedulingIgnoredDuringExecution:
-#       nodeSelectorTerms:
-#       - matchExpressions:
-#         - key: kubernetes.io/arch
-#           operator: In
-#           values:
-#           - amd64
+---
+
+## 🛡️ Securing Access with IP Whitelisting
+
+OpenShift makes it easy to restrict access to your Rocket.Chat instance by IP address using route annotations — no firewall rules or external load balancer configuration needed.
+
+### Allow Only Specific IPs
+
+```bash
+# Allow access only from your office and home IPs
+oc annotate route rocketchat \
+  haproxy.router.openshift.io/ip_whitelist="203.0.113.50 198.51.100.0/24"
 ```
 
-To override tolerations for `meteor` service, or the main rocket.chat deployment, add to the root tolerations key.
-```yaml
-tolerations:
-  - # ...
-```
-To override annotations for `meteor` service, or the main rocket.chat deployment, add to the root podAnnotations key.
-```yaml
-podAnnotations:
-    # add here
-```
-To override the nodeSelector for `meteor` service, or the main rocket.chat deployment, add to the root nodeSelector key.
-```yaml
-nodeSelector:
-    # add here
-```
-To override the affinity for `meteor` service, or the main rocket.chat deployment, add to the root affinity key.
-```yaml
-  affinity:
-#   nodeAffinity:
-#     requiredDuringSchedulingIgnoredDuringExecution:
-#       nodeSelectorTerms:
-#       - matchExpressions:
-#         - key: kubernetes.io/arch
-#           operator: In
-#           values:
-#           - amd64
-```
-### Manage MongoDB and NATS nodeSelector and Affinity
-If MongoDB and NATS own charts are used in the deployment, add the nodeSelector and Affinity to each service. Example:
+### Common Use Cases
 
-```yaml
-mongodb:
-  enabled: true  
-  nodeSelector:
-   kubernetes.io/arch: amd64
-  affinity:
-   nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: kubernetes.io/arch
-          operator: In
-          values:
-          - amd64
-nats:
-  statefulSet:
-    patch:
-      - op: add
-        path: /spec/template/spec/nodeSelector
-        value:
-          kubernetes.io/arch: amd64
-      - op: add
-        path: /spec/template/spec/affinity
-        value:
-          nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: kubernetes.io/arch
-                operator: In
-                values:
-                - amd64
-```
-### Manage MongoDB secrets
+| Scenario | Annotation Value |
+|----------|------------------|
+| Single IP | `203.0.113.50` |
+| Multiple IPs | `203.0.113.50 198.51.100.25` |
+| CIDR range | `10.0.0.0/8` |
+| Mixed | `203.0.113.50 192.168.1.0/24 10.0.0.0/8` |
 
-This chart provides several ways to manage the Connection for MongoDB
-* Values passed to the chart externalMongodbUrl
-* An ExistingMongodbSecret containing the MongoURL
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: my-secret
-type: Opaque
-data:
-  mongo-uri: mongodb://user:password@localhost:27017/rocketchat
+### Remove Restriction
+
+```bash
+oc annotate route rocketchat haproxy.router.openshift.io/ip_whitelist-
 ```
 
-## Federation
+### Verify Configuration
 
-You can enable federation by setting `federation.enabled` to true.
-
-You need to make sure you have two domains, one for rocket.chat another for matrix.
-
-```yaml
-host: <rocket.chat domain>
-federation:
-    host: <matrix domain>
+```bash
+oc get route rocketchat -o jsonpath='{.metadata.annotations.haproxy\.router\.openshift\.io/ip_whitelist}'
 ```
 
-Add the domains to ingress tls config
+This is a great way to lock down a POC or demo instance to only your team's IPs without any infrastructure changes.
 
-```yaml
-ingress:
-  tls:
-    - secretName: <some secret>
-      hosts:
-        - <rocket.chat domain>
-        - <matrix domain>
+---
+
+## 🐛 Troubleshooting
+
+### Security Context Constraint Errors
+
+If you see errors like:
+```
+unable to validate against any security context constraint: 
+.spec.securityContext.fsGroup: Invalid value: []int64{999}: 999 is not an allowed group
 ```
 
-For production, postgres is recommended. Enabled postgres
-```yaml
-postgresql:
-  enabled: true
+This means the Helm chart still has hardcoded security contexts. Re-run the setup or verify the patch:
+
+```bash
+grep -n "999" rocketchat/values.yaml
 ```
 
-For more details on configs, check [postgresql chart](https://artifacthub.io/packages/helm/bitnami/postgresql).
+If you see uncommented `runAsUser: 999` or `fsGroup: 999`, run `./deploy.sh setup` again.
 
-Since TLS is required, also make sure you have something like cert-manager is running on your cluster, and you add the annotations to the ingress with `ingress.annotations` (or whatever is the recommended way for your certificate issuer).
+### MongoDB Version Errors
 
-## hooks
-
-To add custom annotations and labels to pods spawned by pre-upgrade hook
-
-```yaml
-hooks:
-  preUpgrade:
-    podAnnotatios: {} # here
-    podLabels: {} # here
+If Rocket.Chat logs show:
+```
+YOUR CURRENT MONGODB VERSION IS NOT SUPPORTED BY ROCKET.CHAT,
+PLEASE UPGRADE TO VERSION 8.2 OR LATER
 ```
 
-## Monitoring
+Ensure you're using the standalone MongoDB deployment with `mongodb/mongodb-community-server:8.2-ubi9`, not the Bitnami subchart.
 
-This chart supports two Prometheus monitoring approaches: PodMonitor and ServiceMonitor. Each has distinct advantages depending on your monitoring needs:
+### Pod CrashLoopBackOff
 
-#### PodMonitor (Recommended)
-- Scrapes metrics directly from pods matching the selector
-- Captures metrics from pods in all states (including not ready)
-- Provides more comprehensive data for troubleshooting
-- Better visibility into pod lifecycle events
-
-#### ServiceMonitor
-- Uses Kubernetes service selectors to discover pods
-- Only scrapes metrics from pods that are ready and part of the service
-- May miss metrics from pods in transitional states
-- Simpler configuration but less detailed monitoring
-
-#### External components
-
-External components such as NATS and MongoDB by default have metrics enabled and collected by `podmonitors`, if the target cluster does not have Prometheus Operator CRDs, then a service will be created and annotated for Prometheus discovery.
-
-
-- Nats:
-```
-nats:
-  exporter:
-    enabled: false
+```bash
+# Check logs
+oc logs deployment/rocketchat-rocketchat
+oc logs deployment/rocketchat-rocketchat --previous
+oc logs deployment/mongodb
 ```
 
-- MongoDB:
-```
-mongodb:
-  metrics:
-    enabled: false
-```
+Common issues:
+- **MongoDB connection errors**: Verify MongoDB pod is running first
+- **Resource limitations**: Developer Sandbox has memory limits; check if pods are being OOMKilled
+- **Probe failures during first run**: The refactored probes should prevent this, but if you see restarts during admin setup, increase `livenessProbe.initialDelaySeconds` further
 
+### MongoDB Connection Errors
 
-For additional NATS configuration options, refer to the [official NATS Helm chart documentation](https://github.com/nats-io/k8s/tree/nats-1.3.1/helm/charts/nats).
+```bash
+# Verify MongoDB is running
+oc get pods -l app=mongodb
 
-#### TLDR
+# Check MongoDB service
+oc get svc mongodb
 
-Choose PodMonitor if you need detailed pod-level metrics and troubleshooting data. Use ServiceMonitor if you only need metrics from healthy, service-ready pods.
-
-## Upgrading
-
-### To 5.4.3
-
-Due to changes on upstream MongoDB chart, some variables have been renamed (previously deprecated), which, in turn changed how this chart generates its manifests. Values that need changing -
-- `mongodb.auth.username` is no longer supported, and has been changed to `mongodb.auth.usernames` array. If you set it to something custom (defaults to `rocketchat`), make sure you update it to an array and the entry is the **first** entry in that array as that's what Rocket.Chat will use to connect to the database.
-- `mongodb.auth.password` is no longer supported either and has been changed to `mongodb.auth.passwords` array. Update your values file to make it an array and make sure it's the first entry of that array.
-- `mongodb.auth.database` is no longer supported either and has been changed to its plural version, `mongodb.auth.databases`. Update your values file, convert it to an array and make sure it's the first entry of that list.
-- `mongodb.auth.rootUsername` and `mongodb.auth.rootPassword` are staying the same.
-
-*`usernames`, `passwords` and `databases` arrays must be of the same length. Rocket.Chat chart will use the first entry for its mongodb connection string in `MONGO_URL`.*
-
-On each chart update, the used image tag gets updated, **in most cases**. Same is true for the MongoDB chart we use as our dependency. Pre-5.4.3, we had been using the chart version 10.x.x, but starting 5.4.3, the dependency chart version has been bumped to the latest available version, 13.x.x. This chart defaults to mongodb 6.0.x as of the time of writing this.
-
-As a warning, this chart will not handle MongoDB upgrades and will depend on the user to make sure it's running on the supported version. The upgrade will fail if any of the following requirements are not met -
-- must not skip a MongoDB release. E.g. 4.2.x to 5.0.x will fail
-- current `featureCompatibilityVersion` must be compatible with the version user is trying to upgrade to. E.g. if current database version and feature compatibility is 4.4 and 4.2 respectively, but user is trying to upgrade to 5.0, it'll fail
-
-The chart will not check if the mongodb version is supported by the Rocket.Chat version considering deployments, that might occur in an airgapped environment. It is up to the user to make sure of that. Users can check Rocket.Chat's release notes to confirm that.
-
-To get the currently deployed MongoDB version, the easiest method is to get into the mongo shell and running `db.version()`.
-
-It is advised to pin your MongoDB dependency in the values file.
-```yaml
-mongodb:
-  image:
-    tag: # find from https://hub.docker.com/r/bitnami/mongodb/tags
+# Test connection from inside the cluster
+oc run mongo-test --rm -it --image=mongodb/mongodb-community-server:8.2-ubi9 --restart=Never -- \
+  mongosh "mongodb://admin:<password>@mongodb:27017/admin" --eval "db.runCommand({ping:1})"
 ```
 
-References:
-- [Run a shell inside a container (to check mongodb version)](https://kubernetes.io/docs/tasks/debug/debug-application/get-shell-running-container/)
-- [MongoDB upgrade official documentation](https://www.mongodb.com/docs/manual/tutorial/upgrade-revision/)
-- [MongoDB helm chart options](https://artifacthub.io/packages/helm/bitnami/mongodb)
+### Hostname Auto-Detection Failures
 
-### To 6.13.0
+If the deploy script can't determine the apps domain:
 
-**This is only applicable if you both, enabled federation in chart version >=6.8, and want to keep using lighttpd.**
+```bash
+# Check what the script sees
+oc whoami --show-server
+oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'
 
-IFF you manually enabled ingress.federation.serveWellKnown (which was a hidden setting) before, during upgrade, disable it once before enabling it again.
-
-Chart contained a bug that would cause `wellknown` deployment to fail to update (illegal live modification of `matchLabels`).
-
-### To 6.25.0
-
-**This is only applicable if you are using Prometheus monitoring with ServiceMonitor.**
-
-The chart has been updated to allow the use PodMonitor instead of ServiceMonitor for Prometheus metrics collection. If you were using ServiceMonitor before and you wan't to migrate from ServiceMonitor to PodMonitor instead. Here's how to migrate:
-
-1. Remove the old ServiceMonitor configuration:
-```yaml
-serviceMonitor:
-  enabled: true
-  intervals:
-    - 30s
-  ports:
-    - metrics
-prometheusScraping:
-  enabled: true
-  port: 9100
+# Fall back to explicit hostname
+./deploy.sh --host rocketchat.apps.mycluster.example.com
 ```
 
-2. Replace it with the new PodMonitor configuration:
-```yaml
-podMonitor:
-  enabled: true
-  interval: 30s
-prometheusScraping:
-  enabled: true
-  port: "9100"
-  msPort: "9458"
-```
+---
 
-The functionality remains the same, but the implementation has been updated to use the more granular PodMonitor resource type. This change provides better visibility when using multiple replicas for each service.
+## 🚀 Production Recommendations
+
+1. **MongoDB High Availability** — Use MongoDB Community Operator for multi-node replica sets
+2. **Object Storage** — Configure S3-compatible backend for file uploads
+3. **SMTP Configuration** — Set up email notifications
+4. **Resource Limits** — Tune based on user count
+5. **Backup Strategy** — Implement OADP or Velero for disaster recovery
+
+### Resource Sizing
+
+| Users | CPU | Memory | DB Storage |
+|-------|-----|--------|------------|
+| 1-50 | 500m | 1Gi | 5Gi |
+| 50-200 | 1 | 2Gi | 10Gi |
+| 200-500 | 2 | 4Gi | 25Gi |
+| 500+ | 4+ | 8Gi+ | 50Gi+ |
+
+---
+
+## 📝 Notes
+
+- This deployment uses Rocket.Chat's Starter plan (free for up to 50 users)
+- MongoDB runs as a single-node replica set; for HA, consider the MongoDB Community Operator
+- Always backup your MongoDB data before upgrading!
+- The Developer Sandbox resets after 30 days of inactivity
+
+---
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-fix`)
+3. Commit your changes (`git commit -m 'Add amazing fix'`)
+4. Push to the branch (`git push origin feature/amazing-fix`)
+5. Open a Pull Request
+
+---
+
+## 📚 References
+
+- [Rocket.Chat Documentation](https://docs.rocket.chat/)
+- [Rocket.Chat Helm Charts](https://github.com/RocketChat/helm-charts)
+- [MongoDB Community Server Images](https://hub.docker.com/r/mongodb/mongodb-community-server)
+- [OpenShift SCC Documentation](https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html)
+- [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox)
+
+---
+
+## 🙏 Acknowledgments
+
+- [Rocket.Chat](https://rocket.chat) for the amazing open source team communication platform
+- [MongoDB](https://www.mongodb.com) for the Community Server images
+- Red Hat for OpenShift and the Developer Sandbox
+- The patterns from [nextcloud-on-openshift](https://github.com/ryannix123/nextcloud-on-openshift)
+
+---
+
+**⭐ If this saved you hours of debugging, consider giving it a star! ⭐**
