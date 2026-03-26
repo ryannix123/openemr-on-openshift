@@ -9,9 +9,9 @@
 #
 # Usage:
 #   - Manual: Actions → Build and Push OpenEMR → Run workflow
-#   - Scheduled: Runs automatically every Monday at 6am UTC
-#     (auto-detects latest upstream release — no manual version bump needed)
-#   - On push: Builds when Containerfile or workflow changes on main branch
+#   - Scheduled: Runs daily at 6am UTC, builds only if a new upstream release
+#     is detected (compares latest OpenEMR tag against Quay registry)
+#   - On push: Always builds when Containerfile or workflow changes on main
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: Build and Push OpenEMR
@@ -25,11 +25,11 @@ on:
         required: false
         default: ''
 
-  # Auto-run weekly to pick up new patches and security updates
+  # Daily check — only builds if a new upstream release is detected
   schedule:
-    - cron: '0 6 * * 1'  # Every Monday at 6am UTC
+    - cron: '0 6 * * *'  # Daily at 6am UTC
 
-  # Build on push to main when container-related files change
+  # Always build on push when container-related files change
   push:
     branches: [main]
     paths:
@@ -103,15 +103,51 @@ jobs:
           echo "### 📦 Build Version: ${VERSION} (Containerfile fallback)" >> $GITHUB_STEP_SUMMARY
 
       # ─────────────────────────────────────────────────────────────────────────
+      # Check if this version already exists in Quay.
+      # Skips the build on scheduled runs if nothing has changed upstream.
+      # Manual triggers and push events always proceed regardless.
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Check if version already exists in registry
+        id: version_check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          EVENT="${{ github.event_name }}"
+
+          # Manual triggers and push events always build
+          if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "push" ]; then
+            echo "🔨 Event '${EVENT}' — always building"
+            echo "skip=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # For scheduled runs, check if the tag already exists in Quay
+          TAG_EXISTS=$(curl -sf \
+            "https://quay.io/api/v1/repository/${{ env.IMAGE_NAME }}/tag/?specificTag=${VERSION}" \
+            | jq -r '.tags | length')
+
+          if [ "$TAG_EXISTS" -gt 0 ]; then
+            echo "⏭️  ${VERSION} already in registry — skipping build"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "### ⏭️ No new release — build skipped" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Current version:** \`${VERSION}\` is already in the registry." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🆕 New version ${VERSION} detected — proceeding with build"
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────────
       # Set up Docker Buildx
       # ─────────────────────────────────────────────────────────────────────────
       - name: Set up Docker Buildx
+        if: steps.version_check.outputs.skip == 'false'
         uses: docker/setup-buildx-action@v3
 
       # ─────────────────────────────────────────────────────────────────────────
       # Log in to Quay.io
       # ─────────────────────────────────────────────────────────────────────────
       - name: Log in to Quay.io
+        if: steps.version_check.outputs.skip == 'false'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -122,6 +158,7 @@ jobs:
       # Extract metadata for Docker labels and tags
       # ─────────────────────────────────────────────────────────────────────────
       - name: Extract Docker metadata
+        if: steps.version_check.outputs.skip == 'false'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -134,9 +171,9 @@ jobs:
       # Build and push the container image.
       # OPENEMR_VERSION is passed as a build-arg so the Containerfile clones
       # the correct upstream tag regardless of what's hardcoded in the ARG default.
-      # Always rebuilds — no existence check, no skip logic.
       # ─────────────────────────────────────────────────────────────────────────
       - name: Build and push OpenEMR image
+        if: steps.version_check.outputs.skip == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -155,6 +192,7 @@ jobs:
       # Build summary
       # ─────────────────────────────────────────────────────────────────────────
       - name: Build summary
+        if: steps.version_check.outputs.skip == 'false'
         run: |
           echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
