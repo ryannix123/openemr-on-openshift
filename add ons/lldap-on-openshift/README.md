@@ -103,6 +103,18 @@ lldap admin password: <8 characters minimum>
 
 The playbook detects your current namespace from `oc project`, creates the secret, applies the Service first so OpenShift's cert controller can inject the TLS secret, waits for cert injection, then deploys everything else and prints the web UI URL.
 
+### Removing lldap
+
+Pass `-e action=delete` to remove all resources including the PVC and all user data:
+
+```bash
+ansible-playbook -i localhost, deploy.yml -e action=delete
+```
+
+The prompts for base DN and passwords are skipped during cleanup — just press Enter through them.
+
+---
+
 ### Manual deployment
 
 ```bash
@@ -248,6 +260,16 @@ Base DN:     ou=people,dc=example,dc=com
 | `LLDAP_DATABASE_URL` | `sqlite:///data/users.db?mode=rwc` | SQLite path — leave as default |
 | `LLDAP_LDAPS_OPTIONS__ENABLED` | `true` | Enable LDAPS |
 | `LLDAP_LDAPS_OPTIONS__PORT` | `6360` | LDAPS port (non-privileged) |
+
+---
+
+## Nextcloud integration
+
+Full step-by-step `occ` commands for connecting Nextcloud to lldap are documented in the [nextcloud-on-openshift](https://github.com/ryannix123/nextcloud-on-openshift) companion repository:
+
+📄 [additions/authentication/README.md](https://github.com/ryannix123/nextcloud-on-openshift/blob/main/additions/authentication/README.md)
+
+This covers enabling the `user_ldap` app, creating a config slot, wiring up all filters and attribute mappings, and verifying the connection — all via `oc exec` without touching the Nextcloud GUI.
 
 ---
 

@@ -1,11 +1,12 @@
 ---
-- name: Deploy lldap on OpenShift
+- name: Deploy or remove lldap on OpenShift
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    action: deploy
 
   vars_prompt:
     - name: ldap_base_dn
@@ -35,84 +36,122 @@
 
     - name: Show target namespace
       ansible.builtin.debug:
-        msg: "Deploying into namespace: {{ ocp_namespace }}"
+        msg: "{{ action | capitalize }}ing lldap in namespace: {{ ocp_namespace }}"
 
-    - name: Create lldap secret
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: lldap-secret
+    # -------------------------------------------------------------------------
+    # CLEANUP
+    # -------------------------------------------------------------------------
+    - name: Remove all lldap resources
+      when: action == "delete"
+      block:
+        - name: Delete Deployment, Service, Route, ConfigMap, Secrets, and PVC
+          kubernetes.core.k8s:
+            state: absent
             namespace: "{{ ocp_namespace }}"
-            labels:
-              app: lldap
-          type: Opaque
-          stringData:
-            jwt-secret: "{{ jwt_secret }}"
-            admin-password: "{{ admin_password }}"
+            definition:
+              apiVersion: "{{ item.api }}"
+              kind: "{{ item.kind }}"
+              metadata:
+                name: "{{ item.name }}"
+          loop:
+            - { api: apps/v1,                    kind: Deployment,             name: lldap }
+            - { api: v1,                          kind: Service,                name: lldap }
+            - { api: route.openshift.io/v1,       kind: Route,                  name: lldap-web }
+            - { api: v1,                          kind: ConfigMap,              name: lldap-ca-bundle }
+            - { api: v1,                          kind: Secret,                 name: lldap-secret }
+            - { api: v1,                          kind: Secret,                 name: lldap-tls }
+            - { api: v1,                          kind: PersistentVolumeClaim,  name: lldap-data }
 
-    - name: Apply Service (required before Deployment for TLS cert injection)
-      kubernetes.core.k8s:
-        state: present
-        namespace: "{{ ocp_namespace }}"
-        src: manifests/service.yaml
+        - name: Cleanup summary
+          ansible.builtin.debug:
+            msg:
+              - "================================================"
+              - " lldap removed from {{ ocp_namespace }}"
+              - " All resources and user data deleted."
+              - "================================================"
 
-    - name: Wait for OpenShift cert controller to inject TLS secret
-      kubernetes.core.k8s_info:
-        kind: Secret
-        name: lldap-tls
-        namespace: "{{ ocp_namespace }}"
-      register: tls_secret_check
-      until: tls_secret_check.resources | length > 0
-      retries: 12
-      delay: 5
+    # -------------------------------------------------------------------------
+    # DEPLOY
+    # -------------------------------------------------------------------------
+    - name: Deploy lldap
+      when: action == "deploy"
+      block:
+        - name: Create lldap secret
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: lldap-secret
+                namespace: "{{ ocp_namespace }}"
+                labels:
+                  app: lldap
+              type: Opaque
+              stringData:
+                jwt-secret: "{{ jwt_secret }}"
+                admin-password: "{{ admin_password }}"
 
-    - name: Apply PVC, Deployment, and Route
-      kubernetes.core.k8s:
-        state: present
-        namespace: "{{ ocp_namespace }}"
-        src: "{{ item }}"
-      loop:
-        - manifests/pvc.yaml
-        - manifests/deployment.yaml
-        - manifests/route.yaml
+        - name: Apply Service (required before Deployment for TLS cert injection)
+          kubernetes.core.k8s:
+            state: present
+            namespace: "{{ ocp_namespace }}"
+            src: manifests/service.yaml
 
-    - name: Patch LDAP base DN into Deployment
-      ansible.builtin.command: >
-        oc set env deployment/lldap
-        LLDAP_LDAP_BASE_DN={{ ldap_base_dn }}
-        -n {{ ocp_namespace }}
-      changed_when: true
+        - name: Wait for OpenShift cert controller to inject TLS secret
+          kubernetes.core.k8s_info:
+            kind: Secret
+            name: lldap-tls
+            namespace: "{{ ocp_namespace }}"
+          register: tls_secret_check
+          until: tls_secret_check.resources | length > 0
+          retries: 12
+          delay: 5
 
-    - name: Wait for rollout
-      kubernetes.core.k8s_info:
-        kind: Deployment
-        name: lldap
-        namespace: "{{ ocp_namespace }}"
-        wait: true
-        wait_condition:
-          type: Available
-          status: "True"
-        wait_timeout: 120
+        - name: Apply PVC, Deployment, and Route
+          kubernetes.core.k8s:
+            state: present
+            namespace: "{{ ocp_namespace }}"
+            src: "{{ item }}"
+          loop:
+            - manifests/pvc.yaml
+            - manifests/deployment.yaml
+            - manifests/route.yaml
 
-    - name: Get web UI route host
-      ansible.builtin.command: >
-        oc get route lldap-web -n {{ ocp_namespace }} -o jsonpath='{.spec.host}'
-      register: lldap_route_host
-      changed_when: false
+        - name: Patch LDAP base DN into Deployment
+          ansible.builtin.command: >
+            oc set env deployment/lldap
+            LLDAP_LDAP_BASE_DN={{ ldap_base_dn }}
+            -n {{ ocp_namespace }}
+          changed_when: true
 
-    - name: Deployment summary
-      ansible.builtin.debug:
-        msg:
-          - "================================================"
-          - " lldap deployed successfully"
-          - "================================================"
-          - " Namespace:        {{ ocp_namespace }}"
-          - " Base DN:          {{ ldap_base_dn }}"
-          - " Admin DN:         uid=admin,ou=people,{{ ldap_base_dn }}"
-          - " LDAP  (in-ns):    ldap://lldap:3890"
-          - " LDAPS (in-ns):    ldaps://lldap:6360"
-          - " Web UI:           https://{{ lldap_route_host.stdout }}"
-          - "================================================"
+        - name: Wait for rollout
+          kubernetes.core.k8s_info:
+            kind: Deployment
+            name: lldap
+            namespace: "{{ ocp_namespace }}"
+            wait: true
+            wait_condition:
+              type: Available
+              status: "True"
+            wait_timeout: 120
+
+        - name: Get web UI route host
+          ansible.builtin.command: >
+            oc get route lldap-web -n {{ ocp_namespace }} -o jsonpath='{.spec.host}'
+          register: lldap_route_host
+          changed_when: false
+
+        - name: Deployment summary
+          ansible.builtin.debug:
+            msg:
+              - "================================================"
+              - " lldap deployed successfully"
+              - "================================================"
+              - " Namespace:        {{ ocp_namespace }}"
+              - " Base DN:          {{ ldap_base_dn }}"
+              - " Admin DN:         uid=admin,ou=people,{{ ldap_base_dn }}"
+              - " LDAP  (in-ns):    ldap://lldap:3890"
+              - " LDAPS (in-ns):    ldaps://lldap:6360"
+              - " Web UI:           https://{{ lldap_route_host.stdout }}"
+              - "================================================"
