@@ -16,22 +16,19 @@
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-6e7681" alt="Multi-arch">
   <img src="https://img.shields.io/badge/OpenShift-compatible-EE0000?logo=redhat&logoColor=white" alt="OpenShift compatible">
   <img src="https://img.shields.io/badge/RAM-~20MB-success" alt="Low memory footprint">
-  <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License">
-  </a>
 </p>
 
-> **Lightweight LDAP authentication that never leaves the cluster.**
+> **Lightweight in-cluster LDAP authentication for OpenEMR on OpenShift.**
 
 [lldap](https://github.com/lldap/lldap) is a Rust-based lightweight LDAP server purpose-built for authentication. It runs at ~20MB RAM, stores users in a single SQLite file, and includes a built-in web UI for user and group management — no `ldapadd` commands, no schema files, no LDIF.
 
 ---
 
-## Why lldap on OpenShift?
+## Why lldap alongside OpenEMR on OpenShift?
 
-Most enterprise applications that require LDAP authentication are designed to point at an external directory — Active Directory, FreeIPA, or a corporate LDAP server. That model introduces external dependencies, firewall rules, and a hard coupling that breaks whenever the upstream service is unreachable.
+OpenEMR supports LDAP authentication but is typically configured to reach an external directory service — Active Directory or a corporate LDAP server sitting outside the cluster. That introduces external dependencies, firewall rules, and a hard coupling that breaks whenever the upstream service is unreachable.
 
-This project takes a different approach: deploy a self-contained LDAP service directly into your OpenShift namespace. Authentication traffic stays on the pod network, never crosses a namespace boundary, and works in air-gapped or disconnected environments.
+This project deploys lldap directly into the same OpenShift namespace as OpenEMR. Authentication traffic stays on the pod network, never crosses a namespace boundary, and requires no external infrastructure.
 
 ### OpenShift SCC compatibility
 
@@ -53,7 +50,6 @@ lldap's Rust binary runs natively as any UID and needs no privilege escalation. 
 | Bootstrap complexity | High (OLC, slapadd, mdb) | High (dscreate) | None |
 | Storage backend | MDB (file-per-instance) | LMDB + indexes | SQLite (single file) |
 | Built-in web UI | ❌ | ✅ | ✅ |
-| Suitable for auth-only use | ✅ | ✅ | ✅ |
 
 `openldap-servers` was removed from RHEL 8 and all downstream distributions including CentOS Stream 10. 389 DS requires systemd socket activation and cluster-admin to install its operator. lldap works out of the box.
 
@@ -62,9 +58,10 @@ lldap's Rust binary runs natively as any UID and needs no privilege escalation. 
 ## Architecture
 
 ```
-Namespace
+OpenShift Namespace
+├── Deployment/openemr
 ├── Deployment/lldap
-│     ├── LDAP  :3890  (ClusterIP — in-cluster auth)
+│     ├── LDAP  :3890  (ClusterIP — in-cluster auth only)
 │     ├── LDAPS :6360  (ClusterIP — TLS via OpenShift service cert)
 │     └── Web   :17170 (Route — admin UI)
 ├── Service/lldap         (ClusterIP — unreachable from outside the cluster)
@@ -75,7 +72,7 @@ Namespace
 └── PVC/lldap-data        (SQLite database — 256Mi)
 ```
 
-The `lldap` Service is `ClusterIP` only. There is no `NodePort`, no `LoadBalancer`, and no LDAP `Route`. Authentication traffic physically cannot leave the cluster.
+The `lldap` Service is `ClusterIP` only. There is no `NodePort`, no `LoadBalancer`, and no LDAP `Route`. Authentication traffic between OpenEMR and lldap physically cannot leave the cluster.
 
 ---
 
@@ -91,29 +88,26 @@ oc login --token=<token> --server=<api-url>
 
 ### Run the playbook
 
+Switch to the namespace where OpenEMR is running, then:
+
 ```bash
 ansible-playbook -i localhost, deploy.yml
 ```
 
-```
-LDAP base DN [dc=example,dc=com]: dc=myapp,dc=com
-JWT secret (long random string): <use: openssl rand -hex 32>
-lldap admin password: <8 characters minimum>
-```
+The playbook prompts for:
+- **LDAP base DN** — defaults to `dc=example,dc=com`, press Enter to accept
+- **JWT secret** — press Enter to auto-generate, or paste your own
+- **Admin password** — 8 character minimum
 
-The playbook detects your current namespace from `oc project`, creates the secret, applies the Service first so OpenShift's cert controller can inject the TLS secret, waits for cert injection, then deploys everything else and prints the web UI URL.
+It detects your current namespace from `oc project`, creates the secret, applies the Service first so OpenShift's cert controller can inject the TLS secret, then deploys everything else and prints the web UI URL.
 
 ### Removing lldap
-
-Pass `-e action=delete` to remove all resources including the PVC and all user data:
 
 ```bash
 ansible-playbook -i localhost, deploy.yml -e deploy_action=delete
 ```
 
-The prompts for base DN and passwords are skipped during cleanup — just press Enter through them.
-
----
+Removes all resources including the PVC and all user data. No prompts.
 
 ### Manual deployment
 
@@ -128,115 +122,41 @@ oc apply -k manifests/
 
 ---
 
-## Use cases
+## Connecting OpenEMR to lldap
 
-### Namespace-isolated authentication for self-hosted apps
+### Step 1 — Create the user in lldap
 
-Deploy one lldap instance per namespace alongside applications like Nextcloud, Gitea, Rocket.Chat, or OpenEMR. Each namespace gets its own independent user directory. Applications bind to `ldap://lldap:3890` — a ClusterIP address that is unreachable from outside the namespace.
+Log in to the lldap web UI (URL is printed at the end of the playbook run) and create a user. The **User ID** field is what OpenEMR will use as the login username.
 
-### Development and staging environments
+### Step 2 — Create a matching user in OpenEMR
 
-Spin up a real LDAP service in a dev namespace without connecting to production Active Directory. Developers get full control over test users and groups without risking production data.
+Navigate to **Admin → User Administration → Add User** and create a user with the **exact same username** as the lldap User ID. The password set here is ignored once LDAP is enabled — lldap handles authentication — but the user record must exist in OpenEMR's database.
 
-### Air-gapped and disconnected OpenShift clusters
+### Step 3 — Enable LDAP in OpenEMR 8.x
 
-lldap has no external dependencies at runtime. Once the image is mirrored to an internal registry, it runs indefinitely without internet access.
-
-### OpenShift Developer Sandbox
-
-The Developer Sandbox enforces the restricted SCC with no exceptions. lldap is one of the few LDAP implementations that works within these constraints without modification to cluster policy.
-
----
-
-## Connecting applications
-
-### LDAP connection settings
+Navigate to **Admin → Config → Security** and configure:
 
 | Setting | Value |
 |---|---|
-| LDAP URL (plain) | `ldap://lldap:3890` |
-| LDAPS URL | `ldaps://lldap:6360` |
-| Bind DN | `uid=admin,ou=people,dc=example,dc=com` |
-| Users base DN | `ou=people,dc=example,dc=com` |
-| Groups base DN | `ou=groups,dc=example,dc=com` |
-| User filter | `(&(objectClass=person)(uid={login}))` |
-| Group filter | `(member={dn})` |
+| Use LDAP for Authentication | ✅ Enabled |
+| LDAP - Server Name or URI | `ldap://lldap:3890` |
+| LDAP - Distinguished Name of User | `uid={login},ou=people,dc=example,dc=com` |
 
-### Mount the CA bundle for LDAPS
+Save and log out. Log back in using the lldap username and password.
 
-Add to any application Deployment that connects over LDAPS:
+> **Note:** OpenEMR validates the password against lldap but still requires the user to exist in its own database. Both records must be present for login to succeed.
 
-```yaml
-volumeMounts:
-  - name: ldap-ca
-    mountPath: /etc/ldap/ca
-    readOnly: true
-volumes:
-  - name: ldap-ca
-    configMap:
-      name: lldap-ca-bundle
-```
+---
 
-Point your application's TLS config at `/etc/ldap/ca/service-ca.crt`.
+## Managing users
 
-### Nextcloud
+Users are managed entirely through the lldap web UI. No LDIF files or command-line tools required.
 
-In Nextcloud's LDAP/AD integration app (**Apps → LDAP user and group backend**):
+- **Create a user** — Users → Create a user
+- **Reset a password** — click the user → Change password
+- **Assign groups** — useful for role-based access if OpenEMR group filtering is configured
 
-```
-Server:       ldap://lldap
-Port:         3890
-Bind DN:      uid=admin,ou=people,dc=example,dc=com
-Bind password: <admin password>
-Base DN:      dc=example,dc=com
-```
-
-User filter: `(&(objectClass=person)(uid=%uid))`
-Login attribute: `uid`
-Username field: `uid`
-
-### Gitea
-
-In Gitea's admin panel (**Site Administration → Authentication Sources → Add Authentication Source**):
-
-```
-Authentication type: LDAP (simple auth)
-Host:               lldap
-Port:               3890
-Bind DN:            uid=admin,ou=people,dc=example,dc=com
-User search base:   ou=people,dc=example,dc=com
-User filter:        (&(objectClass=person)(uid=%s))
-Username attribute: uid
-Email attribute:    mail
-```
-
-### Rocket.Chat
-
-In Rocket.Chat admin (**Administration → LDAP → Connection**):
-
-```
-Server:    lldap
-Port:      3890
-Bind DN:   uid=admin,ou=people,dc=example,dc=com
-Base DN:   ou=people,dc=example,dc=com
-```
-
-Under **User Search**:
-```
-Filter: (objectclass=person)
-Scope:  sub
-```
-
-### OpenEMR
-
-In OpenEMR's LDAP configuration (**Admin → Globals → LDAP**):
-
-```
-LDAP Host:   ldap://lldap
-LDAP Port:   3890
-Bind DN:     uid=admin,ou=people,dc=example,dc=com
-Base DN:     ou=people,dc=example,dc=com
-```
+After creating a user in lldap, remember to also create the matching record in OpenEMR under **Admin → User Administration**.
 
 ---
 
@@ -244,9 +164,9 @@ Base DN:     ou=people,dc=example,dc=com
 
 | DN | Purpose |
 |---|---|
-| `uid=admin,ou=people,<base>` | Admin — full access to web UI and LDAP |
-| `ou=people,<base>` | User accounts |
-| `ou=groups,<base>` | Groups for role-based access control |
+| `uid=admin,ou=people,<base>` | lldap admin — web UI and LDAP bind |
+| `ou=people,<base>` | OpenEMR user accounts |
+| `ou=groups,<base>` | Groups for role-based access |
 
 ---
 
@@ -255,7 +175,7 @@ Base DN:     ou=people,dc=example,dc=com
 | Variable | Default | Description |
 |---|---|---|
 | `LLDAP_LDAP_BASE_DN` | `dc=example,dc=com` | Root suffix — set before first deploy |
-| `LLDAP_JWT_SECRET` | *(from Secret)* | Token signing secret — use `openssl rand -hex 32` |
+| `LLDAP_JWT_SECRET` | *(from Secret)* | Token signing secret — auto-generated if not provided |
 | `LLDAP_LDAP_USER_PASS` | *(from Secret)* | Admin password — 8 character minimum |
 | `LLDAP_DATABASE_URL` | `sqlite:///data/users.db?mode=rwc` | SQLite path — leave as default |
 | `LLDAP_LDAPS_OPTIONS__ENABLED` | `true` | Enable LDAPS |
@@ -263,27 +183,9 @@ Base DN:     ou=people,dc=example,dc=com
 
 ---
 
-## Nextcloud integration
-
-Full step-by-step `occ` commands for connecting Nextcloud to lldap are documented in the [nextcloud-on-openshift](https://github.com/ryannix123/nextcloud-on-openshift) companion repository:
-
-📄 [additions/authentication/README.md](https://github.com/ryannix123/nextcloud-on-openshift/blob/main/additions/authentication/README.md)
-
-This covers enabling the `user_ldap` app, creating a config slot, wiring up all filters and attribute mappings, and verifying the connection — all via `oc exec` without touching the Nextcloud GUI.
-
----
-
 ## Securing the web UI Route
 
-By default the Route is publicly accessible to anyone with the URL. Add the OpenShift OAuth proxy annotation to restrict access to authenticated cluster users only:
-
-```bash
-oc annotate route lldap-web \
-  haproxy.router.openshift.io/ip_whitelist="" \
-  --overwrite
-```
-
-Or restrict to a specific IP range — useful for limiting web UI access to a VPN or office network:
+By default the Route is publicly accessible. Restrict it to a specific IP range — useful for limiting access to a VPN or office network:
 
 ```bash
 oc annotate route lldap-web \
@@ -291,7 +193,7 @@ oc annotate route lldap-web \
   --overwrite
 ```
 
-You can also set this directly in `manifests/route.yaml` before deploying:
+Or set it in `manifests/route.yaml` before deploying:
 
 ```yaml
 metadata:
@@ -299,7 +201,7 @@ metadata:
     haproxy.router.openshift.io/ip_whitelist: "10.0.0.0/8"
 ```
 
-Note that LDAP and LDAPS traffic on ports 3890 and 6360 are ClusterIP only and already unreachable from outside the cluster — the Route only exposes the web UI on port 17170.
+LDAP and LDAPS traffic on ports 3890 and 6360 are ClusterIP only — the Route only exposes the web UI.
 
 ---
 
@@ -307,4 +209,4 @@ Note that LDAP and LDAPS traffic on ports 3890 and 6360 are ClusterIP only and a
 
 `quay.io/ryan_nix/lldap-openshift:latest`
 
-Built weekly from `lldap:stable`. Multi-arch: `linux/amd64` and `linux/arm64`. The upstream `docker-entrypoint.sh` is patched at build time to remove `chown` and `gosu` calls that are incompatible with OpenShift's restricted SCC.
+Built weekly from `lldap:stable`. Multi-arch: `linux/amd64` and `linux/arm64`. The upstream `docker-entrypoint.sh` is patched at build time to remove `chown` and `gosu` calls incompatible with OpenShift's restricted SCC.
