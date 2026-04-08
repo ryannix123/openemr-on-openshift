@@ -6,23 +6,7 @@
 
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
-    action: deploy
-
-  vars_prompt:
-    - name: ldap_base_dn
-      prompt: "LDAP base DN"
-      default: "dc=example,dc=com"
-      private: false
-
-    - name: jwt_secret
-      prompt: "JWT secret (long random string)"
-      private: true
-      confirm: true
-
-    - name: admin_password
-      prompt: "lldap admin password"
-      private: true
-      confirm: true
+    deploy_action: deploy
 
   tasks:
     - name: Get current OpenShift namespace
@@ -36,13 +20,13 @@
 
     - name: Show target namespace
       ansible.builtin.debug:
-        msg: "{{ action | capitalize }}ing lldap in namespace: {{ ocp_namespace }}"
+        msg: "Action: {{ deploy_action }} — namespace: {{ ocp_namespace }}"
 
     # -------------------------------------------------------------------------
     # CLEANUP
     # -------------------------------------------------------------------------
     - name: Remove all lldap resources
-      when: action == "delete"
+      when: deploy_action == "delete"
       block:
         - name: Delete Deployment, Service, Route, ConfigMap, Secrets, and PVC
           kubernetes.core.k8s:
@@ -54,13 +38,13 @@
               metadata:
                 name: "{{ item.name }}"
           loop:
-            - { api: apps/v1,                    kind: Deployment,             name: lldap }
-            - { api: v1,                          kind: Service,                name: lldap }
-            - { api: route.openshift.io/v1,       kind: Route,                  name: lldap-web }
-            - { api: v1,                          kind: ConfigMap,              name: lldap-ca-bundle }
-            - { api: v1,                          kind: Secret,                 name: lldap-secret }
-            - { api: v1,                          kind: Secret,                 name: lldap-tls }
-            - { api: v1,                          kind: PersistentVolumeClaim,  name: lldap-data }
+            - { api: apps/v1,                    kind: Deployment,            name: lldap }
+            - { api: v1,                          kind: Service,               name: lldap }
+            - { api: route.openshift.io/v1,       kind: Route,                 name: lldap-web }
+            - { api: v1,                          kind: ConfigMap,             name: lldap-ca-bundle }
+            - { api: v1,                          kind: Secret,                name: lldap-secret }
+            - { api: v1,                          kind: Secret,                name: lldap-tls }
+            - { api: v1,                          kind: PersistentVolumeClaim, name: lldap-data }
 
         - name: Cleanup summary
           ansible.builtin.debug:
@@ -74,8 +58,34 @@
     # DEPLOY
     # -------------------------------------------------------------------------
     - name: Deploy lldap
-      when: action == "deploy"
+      when: deploy_action == "deploy"
       block:
+        - name: Prompt for LDAP base DN
+          ansible.builtin.pause:
+            prompt: "LDAP base DN [dc=example,dc=com]"
+          register: ldap_base_dn_input
+
+        - name: Prompt for JWT secret
+          ansible.builtin.pause:
+            prompt: "JWT secret (or press Enter to generate one)"
+            echo: false
+          register: jwt_secret_input
+
+        - name: Generate JWT secret if not provided
+          ansible.builtin.set_fact:
+            jwt_secret: "{{ jwt_secret_input.user_input if jwt_secret_input.user_input else lookup('pipe', 'openssl rand -hex 32') }}"
+
+        - name: Prompt for admin password
+          ansible.builtin.pause:
+            prompt: "lldap admin password (8 character minimum)"
+            echo: false
+          register: admin_password_input
+
+        - name: Set deploy facts
+          ansible.builtin.set_fact:
+            ldap_base_dn: "{{ ldap_base_dn_input.user_input if ldap_base_dn_input.user_input else 'dc=example,dc=com' }}"
+            admin_password: "{{ admin_password_input.user_input }}"
+
         - name: Create lldap secret
           kubernetes.core.k8s:
             state: present

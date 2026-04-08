@@ -108,7 +108,7 @@ The playbook detects your current namespace from `oc project`, creates the secre
 Pass `-e action=delete` to remove all resources including the PVC and all user data:
 
 ```bash
-ansible-playbook -i localhost, deploy.yml -e action=delete
+ansible-playbook -i localhost, deploy.yml -e deploy_action=delete
 ```
 
 The prompts for base DN and passwords are skipped during cleanup — just press Enter through them.
