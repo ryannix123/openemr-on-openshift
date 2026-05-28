@@ -17,6 +17,8 @@ ARG OPENEMR_VERSION=8.0.0.1
 #   - CRB:  dnf config-manager --set-enabled crb
 #   - EPEL: direct Fedora URL (not the epel-release package)
 #   - PHP:  dnf module switch-to php:remi-8.5 (installs or upgrades to 8.5)
+# php-pecl-redis5: required so Composer's platform check sees ext-redis
+#   (OpenEMR's composer.lock declares it as a platform requirement)
 RUN dnf config-manager --set-enabled crb \
     && dnf install -y \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm \
@@ -25,6 +27,7 @@ RUN dnf config-manager --set-enabled crb \
     && dnf install -y \
         git curl unzip \
         php-cli php-json php-mbstring php-xml php-zip \
+        php-pecl-redis5 \
     && dnf clean all \
     && rm -rf /var/cache/dnf /var/log/dnf*
 
