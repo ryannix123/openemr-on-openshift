@@ -467,6 +467,7 @@ metadata:
     app.kubernetes.io/managed-by: kubectl
   annotations:
     app.openshift.io/runtime: php
+    app.openshift.io/custom-icon: "https://www.open-emr.org/images/openemr-blue-logo.png"
 spec:
   replicas: 1
   selector:
