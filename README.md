@@ -62,7 +62,7 @@ This project provides a complete containerized deployment of OpenEMR (Open-sourc
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
-| **OpenEMR** | 8.0.x | Electronic Medical Records System |
+| **OpenEMR** | 8.x | Electronic Medical Records System |
 | **PHP** | 8.5.x | Runtime (Remi's Repository) |
 | **MariaDB** | 11.8 | Database Backend |
 | **Redis** | 8 Alpine | Session Storage & Cache |
@@ -156,7 +156,7 @@ Whether you're a solo practitioner, a community health center, or a large health
 - **Base**: CentOS 10 Stream
 - **PHP**: 8.5 (from Remi's repository)
 - **Web Server**: nginx + PHP-FPM (via supervisord)
-- **OpenEMR**: 8.0.0
+- **OpenEMR**: 8.x
 - **Session Storage**: Redis (tcp://redis:6379)
 - **Features**:
   - OpenShift SCC compliant (runs as arbitrary UID)
@@ -214,7 +214,7 @@ cd openemr-openshift
 If you want to build your own container:
 
 ```bash
-# Build the container (creates both :latest and :8.0.x tags)
+# Build the container (creates both :latest and :8.x.0 tags)
 podman build -t quay.io/ryan_nix/openemr-openshift:latest .
 
 # Push to Quay.io
