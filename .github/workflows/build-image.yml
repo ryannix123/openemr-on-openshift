@@ -1,6 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # OpenEMR Container Build Pipeline
-# Builds with Docker buildx and pushes to Quay.io
+# Builds linux/amd64 + linux/arm64 natively and pushes a multi-arch manifest
+# to Quay.io
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # Required GitHub Secrets:
@@ -12,30 +13,32 @@
 #   - Scheduled: Runs daily at 6am UTC, builds only if a new upstream release
 #     is detected (compares latest OpenEMR tag against Quay registry)
 #   - On push: Always builds when Containerfile or workflow changes on main
+#
+# Architecture:
+#   Each architecture builds on its own native runner and pushes by digest,
+#   then a merge job joins the digests into one manifest list. Cross-building
+#   arm64 on an amd64 runner would mean QEMU, and emulating this image's
+#   composer + npm build stages takes roughly an hour and fails unpredictably.
+#   ubuntu-24.04-arm is free on public repositories.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: Build and Push OpenEMR
 
 on:
-  # Manual trigger with optional version override
   workflow_dispatch:
     inputs:
       openemr_version:
-        description: 'OpenEMR version to build (e.g., 8.0.0.3). Leave empty to auto-detect latest.'
+        description: 'OpenEMR version to build (e.g., 8.4.0). Leave empty to auto-detect latest.'
         required: false
         default: ''
 
-  # Daily check — only builds if a new upstream release is detected
   schedule:
     - cron: '0 6 * * *'  # Daily at 6am UTC
 
-  # Always build on push when container-related files change
   push:
     branches: [main]
     paths:
       - 'Containerfile'
-      - 'configs/**'
-      - 'scripts/**'
       - '.github/workflows/build-image.yml'
 
 env:
@@ -43,25 +46,22 @@ env:
   IMAGE_NAME: ryan_nix/openemr-openshift
 
 jobs:
-  build:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Decide what to build, and whether to build at all
+  # ═══════════════════════════════════════════════════════════════════════════
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      skip: ${{ steps.version_check.outputs.skip }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Determine which OpenEMR version to build
-      #
       # Priority:
-      #   1. Manual workflow_dispatch input (if provided)
-      #   2. Auto-detect latest stable release from GitHub tags
-      #      (scheduled runs + dispatch without version + push)
-      #   3. Fallback: extract version from Containerfile ARG
-      # ─────────────────────────────────────────────────────────────────────────
+      #   1. Manual workflow_dispatch input
+      #   2. Latest stable tag from upstream
+      #   3. Fallback: the Containerfile ARG
       - name: Determine OpenEMR version
         id: version
         run: |
@@ -102,25 +102,20 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "### 📦 Build Version: ${VERSION} (Containerfile fallback)" >> $GITHUB_STEP_SUMMARY
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Check if this version already exists in Quay.
-      # Skips the build on scheduled runs if nothing has changed upstream.
-      # Manual triggers and push events always proceed regardless.
-      # ─────────────────────────────────────────────────────────────────────────
+      # Scheduled runs skip when the tag is already published. Manual triggers
+      # and pushes always build.
       - name: Check if version already exists in registry
         id: version_check
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           EVENT="${{ github.event_name }}"
 
-          # Manual triggers and push events always build
           if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "push" ]; then
             echo "🔨 Event '${EVENT}' — always building"
             echo "skip=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # For scheduled runs, check if the tag already exists in Quay
           TAG_EXISTS=$(curl -sf \
             "https://quay.io/api/v1/repository/${{ env.IMAGE_NAME }}/tag/?specificTag=${VERSION}" \
             | jq -r '.tags | length')
@@ -136,68 +131,136 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Set up Docker Buildx
-      # ─────────────────────────────────────────────────────────────────────────
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Build each architecture on its own native runner, push by digest
+  # ═══════════════════════════════════════════════════════════════════════════
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
-        if: steps.version_check.outputs.skip == 'false'
         uses: docker/setup-buildx-action@v3
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Log in to Quay.io
-      # ─────────────────────────────────────────────────────────────────────────
       - name: Log in to Quay.io
-        if: steps.version_check.outputs.skip == 'false'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_PASSWORD }}
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Extract metadata for Docker labels and tags
-      # ─────────────────────────────────────────────────────────────────────────
+      # Labels only here. Tags are applied once, in the merge job.
       - name: Extract Docker metadata
-        if: steps.version_check.outputs.skip == 'false'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      # push-by-digest publishes an untagged manifest per architecture. Nothing
+      # is reachable by tag until the merge job runs, so a failure on one arch
+      # cannot leave :latest pointing at a half-built set.
+      #
+      # The cache scope is per-arch: a shared scope would have each runner
+      # overwrite the other's layers on every run.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            OPENEMR_VERSION=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          provenance: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Join the per-arch digests into one tagged manifest list
+  # ═══════════════════════════════════════════════════════════════════════════
+  merge:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=latest
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Build and push the container image.
-      # OPENEMR_VERSION is passed as a build-arg so the Containerfile clones
-      # the correct upstream tag regardless of what's hardcoded in the ARG default.
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Build and push OpenEMR image
-        if: steps.version_check.outputs.skip == 'false'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Containerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            OPENEMR_VERSION=${{ steps.version.outputs.version }}
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Build summary
-      # ─────────────────────────────────────────────────────────────────────────
+      - name: Inspect the published manifest
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}
+
       - name: Build summary
-        if: steps.version_check.outputs.skip == 'false'
         run: |
           echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Architectures:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Images pushed:**" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Registry:** [quay.io/${{ env.IMAGE_NAME }}](https://${{ env.REGISTRY }}/repository/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
