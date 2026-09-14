@@ -261,6 +261,16 @@ http {
         root /var/www/html/openemr;
         index index.php index.html;
 
+        # Emit relative Location headers. With absolute_redirect on (the
+        # default) nginx expands `return 302 /path` into an absolute URL built
+        # from the Host header and its own listen port -- so behind a Route it
+        # sends the browser to http://<public-host>:8080/, a port nothing
+        # outside the pod can reach. The request looks like a healthy 302 in
+        # the access log and dies in the browser.
+        absolute_redirect off;
+        port_in_redirect off;
+        server_name_in_redirect off;
+
         # OpenEMR resolves site_id from $_GET['site'] then $_SESSION['site_id'].
         # A cold request to / has neither, and 8.4.0 raises
         # MissingSiteIdException rather than defaulting. Seed it explicitly.
@@ -510,6 +520,30 @@ fi
 mkdir -p "${SITE_DIR}/documents/logs_and_misc/methods"
 chmod -R g=u "${OPENEMR_WEB_ROOT}/sites" 2>/dev/null || true
 chmod -R g=u /var/lib/php/session 2>/dev/null || true
+
+# --- Redis endpoint --------------------------------------------------------
+# Kubernetes injects Docker-link-style variables for every Service in the
+# namespace. A Service named "redis" yields REDIS_PORT=tcp://<clusterIP>:6379,
+# which silently overrides this image's ENV REDIS_PORT=6379 -- the collision is
+# purely the variable name. Left alone it produces a save_path of
+# tcp://redis:tcp://<ip>:6379, PHP reads the port as "tcp", and session reads
+# fail with getaddrinfo errors while the startup banner still claims success.
+#
+# OPENEMR_REDIS_* wins when set, because nothing injects those names.
+REDIS_HOST="${OPENEMR_REDIS_HOST:-${REDIS_HOST:-redis}}"
+REDIS_PORT="${OPENEMR_REDIS_PORT:-${REDIS_PORT:-6379}}"
+
+# Recover the port from the injected form rather than discarding it.
+case "$REDIS_PORT" in
+    tcp://*) REDIS_PORT="${REDIS_PORT##*:}" ;;
+esac
+case "$REDIS_PORT" in
+    ''|*[!0-9]*)
+        echo "⚠ REDIS_PORT was not a port number — falling back to 6379"
+        REDIS_PORT=6379
+        ;;
+esac
+export REDIS_HOST REDIS_PORT
 
 # --- Session backend -------------------------------------------------------
 # Written as a fresh drop-in rather than sed-patching managed config, which
