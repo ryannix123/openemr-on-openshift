@@ -277,22 +277,28 @@ http {
 
         # Readiness: traverses FastCGI, so a dead PHP-FPM fails the probe
         # instead of reporting Ready while serving 500s.
+        # Deliberately NOT FPM's ping.path. FPM matches ping.path against
+        # REQUEST_URI, so /ready can never reach it without faking the URI --
+        # and the ping handler answers inside FPM without executing any PHP,
+        # which is a weaker signal than this probe should carry. Point at a
+        # real one-line script instead: nginx, FastCGI, FPM and the PHP
+        # interpreter all have to work for it to answer.
         location = /ready {
             access_log off;
-            # include FIRST. fastcgi_params sets SCRIPT_NAME itself, so an
-            # override written above the include is the one that loses, and
-            # this endpoint 404s instead of pinging FPM.
             include fastcgi_params;
-            fastcgi_param SCRIPT_NAME /fpm-ping;
+            fastcgi_param SCRIPT_FILENAME $document_root/oe-ready.php;
+            fastcgi_param SCRIPT_NAME /oe-ready.php;
             fastcgi_pass 127.0.0.1:9000;
         }
 
+        # This one works because the location path and pm.status_path are the
+        # same string, so REQUEST_URI matches with no override needed.
         location = /fpm-status {
             access_log off;
             allow 127.0.0.1;
             deny all;
             include fastcgi_params;
-            fastcgi_param SCRIPT_NAME /fpm-status;
+            fastcgi_param SCRIPT_FILENAME $document_root/oe-ready.php;
             fastcgi_pass 127.0.0.1:9000;
         }
 
@@ -381,6 +387,49 @@ stderr_logfile_maxbytes=0
 EOF
 
 # ============================================================================
+# Redis probe
+# ============================================================================
+# A file, not a php -r string spliced from a double-quoted and a single-quoted
+# shell fragment. The old form could not report why it failed, because the only
+# way to keep the quoting readable was to discard stderr.
+RUN cat > /usr/local/bin/oe-redis-probe.php <<'EOF'
+<?php
+try {
+    $r = new Redis();
+    if (!$r->connect(getenv('REDIS_HOST'), (int) (getenv('REDIS_PORT') ?: 6379), 2)) {
+        fwrite(STDERR, "connect() returned false\n");
+        exit(1);
+    }
+    $pass = getenv('REDIS_PASSWORD');
+    if ($pass) {
+        $r->auth($pass);
+    }
+    // connect() alone proves nothing about persistence -- write and read back.
+    $r->set('__probe', 'ok', 10);
+    if ($r->get('__probe') !== 'ok') {
+        fwrite(STDERR, "read-back mismatch\n");
+        exit(1);
+    }
+    exit(0);
+} catch (Throwable $e) {
+    fwrite(STDERR, get_class($e) . ': ' . $e->getMessage() . "\n");
+    exit(1);
+}
+EOF
+
+# ============================================================================
+# Readiness target
+# ============================================================================
+# Intentionally trivial. Readiness answers "can this pod serve PHP", not "is
+# the database healthy" -- probing the database here would take the pod out of
+# rotation during any MariaDB blip and turn one outage into two.
+RUN cat > ${OPENEMR_WEB_ROOT}/oe-ready.php <<'EOF'
+<?php
+header('Content-Type: text/plain');
+echo "ok\n";
+EOF
+
+# ============================================================================
 # Schema version check
 # ============================================================================
 # OpenEMR records the schema revision it expects in version.php and the
@@ -465,19 +514,34 @@ chmod -R g=u /var/lib/php/session 2>/dev/null || true
 # --- Session backend -------------------------------------------------------
 # Written as a fresh drop-in rather than sed-patching managed config, which
 # needs write access to /etc/php.d and dies under `set -e` without it.
-# Probes a real write: connect() alone proves nothing about persistence.
-if php -r "
-    \$r = new Redis();
-    \$r->connect('${REDIS_HOST}', ${REDIS_PORT}, 2);
-    ".'$p = getenv("REDIS_PASSWORD"); if ($p) { $r->auth($p); }
-    $r->set("__probe", "ok", 10);
-    exit($r->get("__probe") === "ok" ? 0 : 1);' 2>/dev/null; then
+#
+# Retried, because the fallback is permanent for the life of the pod. A single
+# 2s attempt at container start loses whenever the Redis Service endpoint is
+# not programmed yet, and the pod then runs on file sessions -- which silently
+# caps the deployment at one replica -- with nothing in the log saying why.
+REDIS_OK=0
+REDIS_ERR=""
+for attempt in 1 2 3 4 5; do
+    set +e
+    REDIS_ERR=$(php /usr/local/bin/oe-redis-probe.php 2>&1)
+    REDIS_RC=$?
+    set -e
+    if [ "$REDIS_RC" = 0 ]; then
+        REDIS_OK=1
+        break
+    fi
+    echo "  Redis attempt ${attempt}/5 failed: ${REDIS_ERR}"
+    [ "$attempt" = 5 ] || sleep 2
+done
+
+if [ "$REDIS_OK" = 1 ]; then
     echo "✓ Redis sessions at ${REDIS_HOST}:${REDIS_PORT} (read/write verified)"
     SAVE_HANDLER=redis
     SAVE_PATH="tcp://${REDIS_HOST}:${REDIS_PORT}"
     [ -n "${REDIS_PASSWORD:-}" ] && SAVE_PATH="${SAVE_PATH}?auth=${REDIS_PASSWORD}"
 else
-    echo "⚠ Redis unusable — file-based sessions (single-pod only)"
+    echo "⚠ Redis unusable after 5 attempts — file-based sessions (single pod only)"
+    echo "  last error: ${REDIS_ERR}"
     SAVE_HANDLER=files
     SAVE_PATH=/var/lib/php/session
 fi
@@ -601,12 +665,12 @@ RUN mkdir -p /var/log/nginx /var/lib/nginx /var/lib/php/session /run/php-fpm \
     && chmod +x /entrypoint.sh \
     && chgrp -R 0 \
         ${OPENEMR_WEB_ROOT} ${OPENEMR_DEFAULTS} /opt/cqm-service \
-        /usr/local/bin/oe-schema-check.php \
+        /usr/local/bin/oe-schema-check.php /usr/local/bin/oe-redis-probe.php \
         /var/log/nginx /var/lib/nginx /var/lib/php /run \
         /etc/nginx /etc/php.d /etc/php-fpm.d /entrypoint.sh \
     && chmod -R g=u \
         ${OPENEMR_WEB_ROOT} ${OPENEMR_DEFAULTS} /opt/cqm-service \
-        /usr/local/bin/oe-schema-check.php \
+        /usr/local/bin/oe-schema-check.php /usr/local/bin/oe-redis-probe.php \
         /var/log/nginx /var/lib/nginx /var/lib/php /run \
         /etc/nginx /etc/php.d /etc/php-fpm.d /entrypoint.sh \
     && chmod g=u /etc/passwd
