@@ -189,6 +189,34 @@
       when: action == "deploy"
       block:
 
+        # -- Existing volumes --------------------------------------------------
+        # OpenEMR reuses whatever schema lives on these volumes. If an earlier
+        # release wrote it, the 8.4.0 container refuses to start rather than
+        # serve blank pages against mismatched tables -- and the admin password
+        # written out below is NOT the password on that database, because the
+        # installer is skipped entirely.
+        - name: Look for existing PVCs
+          kubernetes.core.k8s_info:
+            kind: PersistentVolumeClaim
+            namespace: "{{ openshift_namespace }}"
+            name: "{{ item }}"
+          register: _existing_pvcs
+          loop: [mariadb-data, openemr-sites]
+
+        - name: Warn about reused volumes
+          when: _existing_pvcs.results | selectattr('resources') | list | length > 0
+          ansible.builtin.pause:
+            prompt: |
+              Existing OpenEMR PVCs were found in {{ openshift_namespace }}.
+
+              The deployment will reuse the schema already on them, and the
+              admin password this run reports will not match that database.
+
+              For a clean install, abort and run:
+                ansible-playbook deploy-openemr.yml -e "action=cleanup"
+
+              Press ENTER to continue anyway, or Ctrl+C to abort.
+
         # -- Resolve passwords -------------------------------------------------
         # Priority: pinned in vars/main.yml > existing cluster secret > generated
         - name: Generate candidate passwords
@@ -511,12 +539,18 @@
                   app.kubernetes.io/component: application
                   app.kubernetes.io/part-of: openemr
                   app.kubernetes.io/runtime: php
-                  app.kubernetes.io/version: "8.0.0"
+                  app.kubernetes.io/version: "8.4.0"
                   app.kubernetes.io/managed-by: ansible
                 annotations:
                   app.openshift.io/runtime: php
               spec:
                 replicas: 1
+                # Recreate, not RollingUpdate: the sites PVC is ReadWriteOnce,
+                # so a second pod cannot attach it while the first still holds
+                # it. Single-node clusters get away with it; multi-node ones
+                # hang in ContainerCreating until the rollout times out.
+                strategy:
+                  type: Recreate
                 selector:
                   matchLabels:
                     app: openemr
@@ -528,7 +562,7 @@
                       app.kubernetes.io/component: application
                       app.kubernetes.io/part-of: openemr
                       app.kubernetes.io/runtime: php
-                      app.kubernetes.io/version: "8.0.0"
+                      app.kubernetes.io/version: "8.4.0"
                   spec:
                     containers:
                       - name: openemr
@@ -585,9 +619,13 @@
                         volumeMounts:
                           - name: openemr-sites
                             mountPath: /var/www/html/openemr/sites/default
+                        # /health is nginx answering alone; /ready runs a
+                        # real PHP script through FastCGI. Probing only /health
+                        # lets a pod report Ready while every page is blank,
+                        # because nginx was alive the whole time.
                         startupProbe:
                           httpGet:
-                            path: /health
+                            path: /ready
                             port: 8080
                           initialDelaySeconds: 10
                           periodSeconds: 10
@@ -602,7 +640,7 @@
                           failureThreshold: 3
                         readinessProbe:
                           httpGet:
-                            path: /health
+                            path: /ready
                             port: 8080
                           initialDelaySeconds: 10
                           periodSeconds: 10
@@ -740,17 +778,16 @@
             state: present
             definition: "{{ manifest_openemr_route }}"
 
-        - name: Wait for OpenEMR to be ready
-          kubernetes.core.k8s_info:
-            kind: Pod
-            namespace: "{{ openshift_namespace }}"
-            label_selectors:
-              - app=openemr
-            wait: true
-            wait_condition:
-              type: Ready
-              status: "True"
-            wait_timeout: "{{ openemr_wait_timeout }}"
+        # rollout status, not a Pod label selector: during a redeploy the
+        # OLD pod is still Ready and matches app=openemr, so the wait returns
+        # immediately and the oc exec tasks below land in the container being
+        # replaced.
+        - name: Wait for the OpenEMR rollout to complete
+          ansible.builtin.command: >
+            oc rollout status deployment/openemr
+            -n {{ openshift_namespace }}
+            --timeout={{ openemr_wait_timeout }}s
+          changed_when: false
 
         - name: Create crypto keys directory
           ansible.builtin.command: >

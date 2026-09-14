@@ -108,6 +108,40 @@ The `kustomization.yaml` lets you re-apply everything with:
 oc apply -k ./openemr-manifests/
 ```
 
+## Schema version guard
+
+The container compares the schema recorded in the database against the one the
+image ships, and refuses to start when they disagree. An 8.4.0 image booting
+onto a schema written by an earlier release does not fail visibly — it serves
+blank pages — so the check turns that into a clear startup error instead.
+
+If the playbook finds existing PVCs it pauses and says so, because the run will
+reuse that schema and the admin password it reports will not be the password on
+that database.
+
+```bash
+# Clean install — discards all data
+ansible-playbook deploy-openemr.yml -e "action=cleanup"
+ansible-playbook deploy-openemr.yml
+
+# Real data — upgrade the schema instead
+oc set env deployment/openemr OPENEMR_SKIP_SCHEMA_CHECK=1
+# then visit /sql_upgrade.php before serving traffic, and unset it afterwards
+```
+
+## Health endpoints
+
+| Path      | Answered by      | Used for              |
+|-----------|------------------|-----------------------|
+| `/health` | nginx alone      | liveness              |
+| `/ready`  | PHP via FastCGI  | startup, readiness    |
+
+Readiness deliberately runs a real PHP script rather than nginx's static
+response — a pod that reports Ready on `/health` alone can still serve blank
+pages, since nginx stays up whether or not PHP does. `/ready` checks only that
+PHP executes, not that MariaDB is reachable; coupling readiness to the database
+would pull pods out of rotation during any MariaDB blip.
+
 ## Idempotency
 
 Re-running the playbook is safe — existing Secrets are detected and passwords
