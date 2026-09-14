@@ -3,14 +3,14 @@
 ##############################################################################
 # OpenEMR on OpenShift - Deployment Script
 #
-# Deploys OpenEMR 8.0.0 with MariaDB and Redis on OpenShift.
+# Deploys OpenEMR 8.4.0 with MariaDB and Redis on OpenShift.
 # Works on Developer Sandbox, Single Node OpenShift (SNO), and full clusters.
 #
 # Storage class is auto-detected from the cluster default unless overridden:
 #   STORAGE_CLASS=lvms-vg1 ./deploy-openemr.sh
 #
 # Author: Ryan Nix <ryan.nix@gmail.com>
-# Version: 1.2
+# Version: 1.3
 ##############################################################################
 
 set -e
@@ -156,6 +156,33 @@ detect_project() {
     fi
 
     export PROJECT_NAME
+}
+
+##############################################################################
+# Existing State
+##############################################################################
+
+check_existing_state() {
+    local existing=""
+    for pvc in mariadb-data openemr-sites; do
+        oc get pvc "$pvc" &>/dev/null && existing="${existing} ${pvc}"
+    done
+
+    [[ -z "$existing" ]] && return 0
+
+    print_header "Existing Volumes Detected"
+    print_warning "Found:${existing}"
+    echo ""
+    print_warning "OpenEMR will reuse whatever schema lives on those volumes. If it was"
+    print_warning "written by an earlier release, the container now refuses to start"
+    print_warning "rather than serve blank pages against mismatched tables."
+    echo ""
+    print_warning "The admin password printed at the end of this run is also NOT the"
+    print_warning "password on an existing database — the installer is skipped."
+    echo ""
+    print_info "Starting fresh:  $0 --cleanup   (deletes all data), then redeploy."
+    print_info "Continuing in 10s — Ctrl-C to abort."
+    sleep 10
 }
 
 ##############################################################################
@@ -463,13 +490,19 @@ metadata:
     app.kubernetes.io/component: application
     app.kubernetes.io/part-of: openemr
     app.kubernetes.io/runtime: php
-    app.kubernetes.io/version: "8.0.0"
+    app.kubernetes.io/version: "8.4.0"
     app.kubernetes.io/managed-by: kubectl
   annotations:
     app.openshift.io/runtime: php
     app.openshift.io/custom-icon: "https://www.open-emr.org/images/openemr-blue-logo.png"
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate: the sites PVC is ReadWriteOnce, so a second
+  # pod cannot attach it while the first still holds it. On SNO both land on
+  # the same node and it happens to work; on any multi-node cluster the new
+  # pod hangs in ContainerCreating until the rollout times out.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: openemr
@@ -481,7 +514,7 @@ spec:
         app.kubernetes.io/component: application
         app.kubernetes.io/part-of: openemr
         app.kubernetes.io/runtime: php
-        app.kubernetes.io/version: "8.0.0"
+        app.kubernetes.io/version: "8.4.0"
     spec:
       containers:
       - name: openemr
@@ -538,9 +571,12 @@ spec:
         volumeMounts:
         - name: openemr-sites
           mountPath: /var/www/html/openemr/sites/default
+        # /health is nginx answering by itself; /ready traverses FastCGI into
+        # PHP-FPM. Probing only /health is why a pod can sit Ready while every
+        # page renders blank — nginx was alive the whole time.
         startupProbe:
           httpGet:
-            path: /health
+            path: /ready
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 10
@@ -555,7 +591,7 @@ spec:
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /health
+            path: /ready
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 10
@@ -621,7 +657,11 @@ spec:
 EOF
     print_success "OpenEMR route created"
 
-    wait_for_pod "app=openemr" 300
+    # rollout status, not `oc wait pod`: during a redeploy the OLD pod is still
+    # Ready and the label selector matches it, so `oc wait` returns immediately
+    # and the oc exec below lands in the container being replaced.
+    print_info "Waiting for the OpenEMR rollout to complete..."
+    oc rollout status deployment/openemr --timeout=600s
     print_success "OpenEMR is ready"
 
     print_info "Creating crypto keys directory..."
@@ -824,6 +864,7 @@ main() {
             print_header "OpenEMR on OpenShift — Deployment"
             preflight_checks
             detect_project
+            check_existing_state
             deploy_mariadb
             deploy_redis
             deploy_openemr

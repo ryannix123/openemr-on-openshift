@@ -1,24 +1,13 @@
-# OpenEMR Container - CentOS Stream 10 with Remi PHP 8.5
-# Multi-stage build for optimized final image
-# Runs nginx + PHP-FPM + CQM in single container with supervisord
+# OpenEMR Container — CentOS Stream 10 + Remi PHP 8.5
+# nginx + PHP-FPM + CQM under supervisord, OpenShift arbitrary-UID safe
 
 # ============================================================================
-# Stage 1: Builder - Download and prepare OpenEMR + CQM service
+# Stage 1: Builder
 # ============================================================================
 FROM quay.io/centos/centos:stream10 AS builder
 
-# OpenEMR version — single source of truth for the entire build.
-# Override at build time:  --build-arg OPENEMR_VERSION=<version>
-# Tag format: dots → underscores, prefixed with 'v'  (e.g. 8.0.0.2 → v8_0_0_2)
-ARG OPENEMR_VERSION=8.0.0.1
+ARG OPENEMR_VERSION=8.4.0
 
-# Install all build dependencies in one layer.
-# Repo setup per Remi's official EL10 wizard (https://rpms.remirepo.net/wizard/):
-#   - CRB:  dnf config-manager --set-enabled crb
-#   - EPEL: direct Fedora URL (not the epel-release package)
-#   - PHP:  dnf module switch-to php:remi-8.5 (installs or upgrades to 8.5)
-# php-pecl-redis5: required so Composer's platform check sees ext-redis
-#   (OpenEMR's composer.lock declares it as a platform requirement)
 RUN dnf config-manager --set-enabled crb \
     && dnf install -y \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm \
@@ -27,65 +16,67 @@ RUN dnf config-manager --set-enabled crb \
     && dnf install -y \
         git curl unzip \
         php-cli php-json php-mbstring php-xml php-zip \
+        php-process \
         php-pecl-redis5 \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf /var/log/dnf*
+    && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf*
 
-# Install Composer
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+RUN curl -sS https://getcomposer.org/installer | php -- \
+        --install-dir=/usr/local/bin --filename=composer
 
-# Install Node.js 22 + yarn for CQM dependency resolution
-RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
+# NodeSource via explicit repo + imported GPG key — no `curl | bash`.
+RUN rpm --import https://rpm.nodesource.com/gpgkey/ns-operations-public.key \
+    && printf '%s\n' \
+        '[nodesource-nodejs]' \
+        'name=Node.js 22' \
+        'baseurl=https://rpm.nodesource.com/pub_22.x/nodistro/nodejs/$basearch' \
+        'gpgkey=https://rpm.nodesource.com/gpgkey/ns-operations-public.key' \
+        'gpgcheck=1' \
+        'enabled=1' > /etc/yum.repos.d/nodesource.repo \
     && dnf install -y nodejs \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf \
+    && dnf clean all && rm -rf /var/cache/dnf \
     && npm install -g yarn --quiet
 
-# Clone and install oe-cqm-service (no public image exists — built from source)
 RUN git clone --depth 1 https://github.com/openemr/oe-cqm-service.git /opt/cqm-service \
     && cd /opt/cqm-service \
     && yarn install --production --non-interactive \
     && yarn cache clean
 
-# Clone OpenEMR from GitHub (shallow clone of the version tag)
-# Tag format: dots → underscores, prefixed with 'v'  (e.g. 8.0.0.1 → v8_0_0_1)
 WORKDIR /tmp
 RUN GIT_TAG="v$(echo ${OPENEMR_VERSION} | tr '.' '_')" \
     && echo "Cloning OpenEMR tag: ${GIT_TAG}" \
     && git clone https://github.com/openemr/openemr.git --branch "${GIT_TAG}" --depth 1
 
-# InstallerAuto.php is included in OpenEMR source at contrib/util/installScripts/
-# It supports no_root_db_access mode which works with pre-created databases
-
-# Install PHP dependencies with Composer
 WORKDIR /tmp/openemr
 RUN composer install --no-dev --no-interaction --optimize-autoloader
 
-# Note: npm build skipped - OpenEMR handles frontend build on first run
-# This matches official OpenEMR Docker behavior and avoids build crashes
+# Frontend build happens here so the runtime stage needs neither npm nor network.
+RUN npm install --legacy-peer-deps \
+    && npm run build \
+    && rm -rf node_modules \
+    && npm cache clean --force
 
-# Remove unnecessary files to reduce image size.
-# Documentation (~598M) and swagger (~8.8M) are runtime dead weight.
-# Keep composer vendor/ — required. Keep contrib/util/installScripts/ — used by entrypoint.
-RUN cd /tmp/openemr && \
-    rm -rf .git .github .travis* tests docker contrib/util/docker \
+# Prune. Scoped so vendor/ LICENSE files survive — we redistribute this image
+# and MIT/Apache-2.0/BSD all require the license text be retained.
+RUN rm -rf .git .github .travis* tests docker contrib/util/docker \
         Documentation swagger \
-    && find . -type f -name "*.md" -delete \
-    && find . -type f -name "*.jar" -delete \
-    && find . -type f -name "*.war" -delete
+    && find . -maxdepth 2 -type f -name "*.md" -not -iname "LICENSE*" -delete \
+    && find . -type f \( -name "*.jar" -o -name "*.war" \) -delete
 
-# Verify InstallerAuto.php exists before proceeding
 RUN test -f /tmp/openemr/contrib/util/installScripts/InstallerAuto.php \
-    && echo "✓ InstallerAuto.php found" \
-    || (echo "ERROR: InstallerAuto.php not found!" && exit 1)
+    || (echo "ERROR: InstallerAuto.php not found" && exit 1)
+
+# Echo what the checkout actually is. A tag typo otherwise ships silently and
+# only surfaces as a schema mismatch at first boot.
+RUN php -r 'require "/tmp/openemr/version.php"; \
+    printf("Built from version.php: %d.%d.%d  (schema version %d)\n", \
+    $v_major, $v_minor, $v_patch, $v_database);'
 
 # ============================================================================
-# Stage 2: Runtime - Build final container
+# Stage 2: Runtime
 # ============================================================================
 FROM quay.io/centos/centos:stream10
 
-# Re-declare ARG so it's available in this stage
-ARG OPENEMR_VERSION=8.0.0.1
+ARG OPENEMR_VERSION=8.4.0
 
 LABEL maintainer="Ryan Nix <ryan.nix@gmail.com>" \
       description="OpenEMR on CentOS Stream 10 - OpenShift Ready" \
@@ -95,20 +86,17 @@ LABEL maintainer="Ryan Nix <ryan.nix@gmail.com>" \
       io.openshift.expose-services="8080:http" \
       app.openshift.io/runtime=php
 
-# Environment variables
 ENV OPENEMR_VERSION=${OPENEMR_VERSION} \
     OPENEMR_WEB_ROOT=/var/www/html/openemr \
+    OPENEMR_DEFAULTS=/opt/openemr/sites-default \
+    OPENEMR_SITE=default \
     PHP_FPM_PORT=9000 \
     NGINX_PORT=8080 \
-    PHP_VERSION=8.5
+    REDIS_HOST=redis \
+    REDIS_PORT=6379 \
+    OPCACHE_VALIDATE_TIMESTAMPS=1 \
+    OPENEMR_DEBUG=0
 
-# Install ALL runtime packages in a single layer — eliminates 6 intermediate layers.
-# Repo setup per Remi's official EL10 wizard (https://rpms.remirepo.net/wizard/):
-#   - CRB:  dnf config-manager --set-enabled crb
-#   - EPEL: direct Fedora URL (not the epel-release package)
-#   - PHP:  dnf module switch-to php:remi-8.5 (installs or upgrades to 8.5)
-# php-xmlrpc: removed from PHP 8.0+ core, unavailable on EL10.
-# wget: removed — curl is already present throughout.
 RUN dnf config-manager --set-enabled crb \
     && dnf install -y \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm \
@@ -117,126 +105,80 @@ RUN dnf config-manager --set-enabled crb \
     && dnf module switch-to php:remi-8.5 -y \
     && dnf install -y \
         nginx \
-        # PHP Core
         php php-fpm php-cli php-common \
-        # Database
         php-mysqlnd php-pdo \
-        # OpenEMR Required Extensions
         php-gd php-xml php-mbstring php-json php-zip \
         php-curl php-opcache php-ldap php-soap php-bcmath php-intl \
-        # OpenEMR Recommended Extensions
         php-imap php-tidy php-sodium \
-        # Session handling
+        php-process \
         php-pecl-redis5 \
-        # Process management
         supervisor \
-        # Utilities
-        unzip \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf /var/log/dnf* /tmp/dnf*
+    && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* /tmp/dnf*
 
-# Install Node.js 22 (runtime for CQM service + OpenEMR frontend build)
-RUN curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - \
+# Node is needed at runtime for the CQM service only.
+RUN rpm --import https://rpm.nodesource.com/gpgkey/ns-operations-public.key \
+    && printf '%s\n' \
+        '[nodesource-nodejs]' \
+        'name=Node.js 22' \
+        'baseurl=https://rpm.nodesource.com/pub_22.x/nodistro/nodejs/$basearch' \
+        'gpgkey=https://rpm.nodesource.com/gpgkey/ns-operations-public.key' \
+        'gpgcheck=1' \
+        'enabled=1' > /etc/yum.repos.d/nodesource.repo \
     && dnf install -y nodejs \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf /var/log/dnf* \
-    && node --version && npm --version
+    && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf*
 
-# Copy OpenEMR from builder stage
 COPY --from=builder /tmp/openemr ${OPENEMR_WEB_ROOT}
-
-# Copy CQM service from builder stage (built from source — no public image available)
 COPY --from=builder /opt/cqm-service /opt/cqm-service
 
-# Verify InstallerAuto.php was copied
-RUN test -f ${OPENEMR_WEB_ROOT}/contrib/util/installScripts/InstallerAuto.php \
-    && echo "✓ InstallerAuto.php present in final image"
-
-# Build OpenEMR frontend assets then purge all npm artifacts
-WORKDIR ${OPENEMR_WEB_ROOT}
-RUN npm install --legacy-peer-deps \
-    && npm run build \
-    && rm -rf node_modules \
-    && npm cache clean --force \
-    && echo "✓ Frontend assets built successfully"
-
-# Preserve default site files for PVC-mounted deployments.
-# When a PVC is mounted at sites/default/, it overlays the image layer and
-# hides files like config.php.  The entrypoint restores any missing files
-# from this backup directory on first start.
-RUN cp -a ${OPENEMR_WEB_ROOT}/sites/default ${OPENEMR_WEB_ROOT}/sites/default.dist
+# Pristine default site OUTSIDE the web root. The deploy script mounts the PVC
+# at sites/default, so anything staged inside it is invisible at runtime.
+RUN mkdir -p /opt/openemr \
+    && cp -a ${OPENEMR_WEB_ROOT}/sites/default ${OPENEMR_DEFAULTS}
 
 # ============================================================================
-# PHP Configuration
+# PHP
 # ============================================================================
-
-# Create custom PHP configuration for OpenEMR
 RUN cat > /etc/php.d/99-openemr.ini <<'EOF'
-; OpenEMR PHP Configuration
-; PHP ini files require semicolons for comments (# is rejected in PHP 8.x)
-
-; File Upload Settings (for medical documents, images, lab results)
 upload_max_filesize = 128M
 post_max_size = 128M
 max_input_vars = 3000
 
-; Memory and Execution
 memory_limit = 512M
 max_execution_time = 300
 max_input_time = 300
 
-; Session Configuration (Redis-backed for multi-pod deployments)
-session.save_handler = redis
-session.save_path = "tcp://redis:6379"
 session.gc_maxlifetime = 7200
 session.cookie_httponly = 1
 session.cookie_secure = 1
 session.use_strict_mode = 1
 
-; Error Handling (Production)
 display_errors = Off
 display_startup_errors = Off
-error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+error_reporting = E_ALL & ~E_DEPRECATED
 log_errors = On
-error_log = /dev/stderr
+; /dev/stderr breaks across PHP-FPM worker re-exec — errors silently vanish.
+error_log = /proc/self/fd/2
 
-; Security
 expose_php = Off
 allow_url_fopen = On
 allow_url_include = Off
 
-; Date/Time
 date.timezone = UTC
 
-; OPcache (Performance)
 opcache.enable = 1
 opcache.memory_consumption = 256
 opcache.interned_strings_buffer = 16
 opcache.max_accelerated_files = 10000
-opcache.validate_timestamps = 0
-opcache.revalidate_freq = 0
 opcache.save_comments = 1
 EOF
 
-# ============================================================================
-# PHP-FPM Configuration
-# ============================================================================
-
+# listen.owner/group/mode are inert on a TCP listener; user/group are ignored
+# when the FPM master isn't root, which it never is on OpenShift. Both removed
+# rather than left implying isolation that isn't happening.
 RUN cat > /etc/php-fpm.d/www.conf <<'EOF'
 [www]
-; Unix socket or TCP (we use TCP for easier container networking)
 listen = 127.0.0.1:9000
 
-; Process ownership (OpenShift uses arbitrary UIDs, group 0)
-listen.owner = nginx
-listen.group = root
-listen.mode = 0660
-
-; Process manager configuration
-user = nginx
-group = root
-
-; Dynamic process management
 pm = dynamic
 pm.max_children = 50
 pm.start_servers = 5
@@ -245,33 +187,24 @@ pm.max_spare_servers = 35
 pm.process_idle_timeout = 10s
 pm.max_requests = 500
 
-; Logging
 access.log = /dev/stdout
 catch_workers_output = yes
 decorate_workers_output = no
 
-; Health check endpoint
 pm.status_path = /fpm-status
 ping.path = /fpm-ping
 ping.response = pong
 
-; Session configuration (Redis)
-php_value[session.save_handler] = redis
-php_value[session.save_path] = "tcp://redis:6379"
-php_value[session.gc_maxlifetime] = 7200
-
-; Security
 php_admin_flag[log_errors] = on
-php_admin_value[error_log] = /dev/stderr
+php_admin_value[error_log] = /proc/self/fd/2
 EOF
 
 # ============================================================================
-# nginx Configuration
+# nginx
 # ============================================================================
-
 RUN cat > /etc/nginx/nginx.conf <<'EOF'
-# nginx configuration for OpenEMR
-user nginx;
+# `user` omitted deliberately: nginx warns and ignores it when the master
+# process is not root, which is always the case on OpenShift.
 worker_processes auto;
 error_log /dev/stderr warn;
 pid /run/nginx.pid;
@@ -285,28 +218,41 @@ http {
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
 
-    # Logging
     log_format main '$remote_addr - $remote_user [$time_local] "$request" '
                     '$status $body_bytes_sent "$http_referer" '
                     '"$http_user_agent" "$http_x_forwarded_for"';
     access_log /dev/stdout main;
 
-    # Performance
     sendfile on;
     tcp_nopush on;
     tcp_nodelay on;
     keepalive_timeout 65;
     types_hash_max_size 2048;
 
-    # Gzip Compression
+    client_body_temp_path /tmp/nginx-client-body;
+    proxy_temp_path       /tmp/nginx-proxy;
+    fastcgi_temp_path     /tmp/nginx-fastcgi;
+    uwsgi_temp_path       /tmp/nginx-uwsgi;
+    scgi_temp_path        /tmp/nginx-scgi;
+
     gzip on;
     gzip_vary on;
     gzip_min_length 1024;
     gzip_proxied any;
     gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml application/json application/javascript 
+    gzip_types text/plain text/css text/xml application/json application/javascript
                application/xml application/xml+rss text/javascript application/x-font-ttf
                font/opentype image/svg+xml;
+
+    # The OpenShift router terminates TLS at the edge, so nginx and PHP both
+    # see plain HTTP on the wire. Without translating the router's header,
+    # OpenEMR builds http:// self-URLs while the browser holds Secure-only
+    # cookies it will not send back. That disagreement presents as a blank
+    # page or a login that loops — never as a visible error.
+    map $http_x_forwarded_proto $fcgi_https {
+        default "";
+        https   on;
+    }
 
     server {
         listen 8080 default_server;
@@ -315,63 +261,67 @@ http {
         root /var/www/html/openemr;
         index index.php index.html;
 
-        # Health check endpoints
-        location /health {
+        # OpenEMR resolves site_id from $_GET['site'] then $_SESSION['site_id'].
+        # A cold request to / has neither, and 8.4.0 raises
+        # MissingSiteIdException rather than defaulting. Seed it explicitly.
+        location = / {
+            return 302 /interface/login/login.php?site=default;
+        }
+
+        # Liveness: is nginx alive. Says nothing about PHP.
+        location = /health {
             access_log off;
             return 200 "healthy\n";
             add_header Content-Type text/plain;
         }
 
-        location /fpm-status {
+        # Readiness: traverses FastCGI, so a dead PHP-FPM fails the probe
+        # instead of reporting Ready while serving 500s.
+        location = /ready {
             access_log off;
-            fastcgi_pass 127.0.0.1:9000;
-            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            # include FIRST. fastcgi_params sets SCRIPT_NAME itself, so an
+            # override written above the include is the one that loses, and
+            # this endpoint 404s instead of pinging FPM.
             include fastcgi_params;
+            fastcgi_param SCRIPT_NAME /fpm-ping;
+            fastcgi_pass 127.0.0.1:9000;
         }
 
-        # Zend modules (Manage Modules, Care Coordination, etc.)
+        location = /fpm-status {
+            access_log off;
+            allow 127.0.0.1;
+            deny all;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_NAME /fpm-status;
+            fastcgi_pass 127.0.0.1:9000;
+        }
+
         location /interface/modules/zend_modules/public/ {
             try_files $uri $uri/ /interface/modules/zend_modules/public/index.php?$query_string;
         }
 
-        # OpenEMR main application
         location / {
             try_files $uri $uri/ /index.php?$query_string;
         }
 
-        # PHP processing
         location ~ \.php$ {
             try_files $uri =404;
             fastcgi_split_path_info ^(.+\.php)(/.+)$;
             fastcgi_pass 127.0.0.1:9000;
             fastcgi_index index.php;
-            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
             include fastcgi_params;
-            
-            # Increased timeouts for long-running reports
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_param PATH_INFO $fastcgi_path_info;
+            fastcgi_param HTTPS $fcgi_https;
             fastcgi_read_timeout 300;
             fastcgi_send_timeout 300;
         }
 
-        # Deny access to sensitive files
-        location ~ /\.ht {
-            deny all;
-        }
-        
-        location ~ /\.git {
-            deny all;
-        }
+        location ~ /\.ht  { deny all; }
+        location ~ /\.git { deny all; }
+        location ~ ^/sites/.*/documents { deny all; }
+        location ~ ^/sites/default/sqlconf.php { deny all; }
 
-        # OpenEMR specific denies
-        location ~ ^/sites/.*/documents {
-            deny all;
-        }
-
-        location ~ ^/sites/default/sqlconf.php {
-            deny all;
-        }
-
-        # Allow larger uploads for medical documents
         client_max_body_size 128M;
         client_body_buffer_size 128k;
     }
@@ -379,11 +329,8 @@ http {
 EOF
 
 # ============================================================================
-# Supervisor Configuration (manages nginx + PHP-FPM)
+# supervisord
 # ============================================================================
-
-RUN mkdir -p /var/log/supervisor
-
 RUN cat > /etc/supervisord.conf <<'EOF'
 [supervisord]
 nodaemon=true
@@ -411,8 +358,6 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
-stdout_events_enabled=true
-stderr_events_enabled=true
 
 [program:nginx]
 command=/usr/sbin/nginx -g 'daemon off;'
@@ -423,8 +368,6 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
-stdout_events_enabled=true
-stderr_events_enabled=true
 
 [program:cqm]
 command=node /opt/cqm-service/server.js
@@ -435,210 +378,240 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
-stdout_events_enabled=true
-stderr_events_enabled=true
 EOF
 
 # ============================================================================
-# OpenShift Permissions and Security
+# Schema version check
 # ============================================================================
+# OpenEMR records the schema revision it expects in version.php and the
+# revision actually applied in the `version` table. They are the same pair of
+# values the application itself compares to decide an upgrade is due.
+RUN cat > /usr/local/bin/oe-schema-check.php <<'EOF'
+<?php
+$webRoot = getenv('OPENEMR_WEB_ROOT');
+require "$webRoot/version.php";
 
-# Create directories, set OpenShift-compatible permissions (arbitrary UID, GID 0),
-# and make required OpenEMR paths writable — all in one layer
-RUN mkdir -p \
-        /var/log/php-fpm /var/log/nginx /var/lib/nginx /var/lib/php/session \
-        /run/php-fpm /tmp/sessions \
-        ${OPENEMR_WEB_ROOT}/sites/default/documents \
-        ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods \
-    && chmod -R 775 /tmp/sessions \
-    && chgrp -R 0 \
-        ${OPENEMR_WEB_ROOT} /var/log/nginx /var/log/php-fpm /var/lib/nginx \
-        /var/lib/php /run /tmp/sessions /etc/nginx /etc/php-fpm.d /opt/cqm-service \
-    && chmod -R g=u \
-        ${OPENEMR_WEB_ROOT} /var/log/nginx /var/log/php-fpm /var/lib/nginx \
-        /var/lib/php /run /tmp/sessions /etc/nginx /etc/php-fpm.d /opt/cqm-service \
-    && chmod -R 770 \
-        ${OPENEMR_WEB_ROOT}/sites/default/documents \
-        ${OPENEMR_WEB_ROOT}/sites \
-        ${OPENEMR_WEB_ROOT}/interface/modules/zend_modules/config \
-        ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc
+if (!isset($v_database)) {
+    fwrite(STDERR, "schema-check: version.php has no \$v_database\n");
+    exit(2);
+}
 
-# Create entrypoint script
+$c = @mysqli_connect(
+    getenv('MYSQL_HOST'),
+    getenv('MYSQL_USER'),
+    getenv('MYSQL_PASS'),
+    getenv('MYSQL_DATABASE'),
+    (int) (getenv('MYSQL_PORT') ?: 3306)
+);
+if (!$c) {
+    fwrite(STDERR, "schema-check: cannot connect to database\n");
+    exit(2);
+}
+
+$r = @mysqli_query($c, 'SELECT v_major, v_minor, v_patch, v_database FROM version LIMIT 1');
+if (!$r || !($row = mysqli_fetch_assoc($r))) {
+    fwrite(STDERR, "schema-check: no readable version table\n");
+    exit(2);
+}
+
+printf(
+    "database is %d.%d.%d (schema %d) / image is %d.%d.%d (schema %d)",
+    $row['v_major'], $row['v_minor'], $row['v_patch'], $row['v_database'],
+    $v_major, $v_minor, $v_patch, $v_database
+);
+
+exit(((int) $row['v_database'] === (int) $v_database) ? 0 : 1);
+EOF
+
+# ============================================================================
+# Entrypoint
+# ============================================================================
 RUN cat > /entrypoint.sh <<'ENTRYPOINT'
 #!/bin/bash
-set -e
+set -euo pipefail
 
 echo "=========================================="
-echo "Starting OpenEMR Container"
-echo "=========================================="
-echo "OpenEMR Version: ${OPENEMR_VERSION}"
-echo "PHP Version: $(php -v | head -n 1)"
-echo "Web Root: ${OPENEMR_WEB_ROOT}"
-echo ""
-echo "Configuration:"
-echo "  - PHP-FPM: 127.0.0.1:${PHP_FPM_PORT}"
-echo "  - nginx: 0.0.0.0:${NGINX_PORT}"
-echo "  - UID: $(id -u), GID: $(id -g)"
+echo "OpenEMR ${OPENEMR_VERSION}"
+echo "PHP: $(php -v | head -n 1)"
+echo "UID: $(id -u)  GID: $(id -g)"
 echo "=========================================="
 
-# Ensure permissions are correct (OpenShift may assign random UID)
-echo "Setting permissions for UID $(id -u)..."
-chmod -R g=u ${OPENEMR_WEB_ROOT}/sites 2>/dev/null || true
-chmod -R g=u /tmp/sessions 2>/dev/null || true
+# OpenShift assigns a UID with no /etc/passwd entry. Some PHP and Node calls
+# (getpwuid, os.userInfo) throw without one.
+if ! whoami &>/dev/null && [ -w /etc/passwd ]; then
+    echo "openemr:x:$(id -u):0:OpenEMR:${OPENEMR_WEB_ROOT}:/sbin/nologin" >> /etc/passwd
+fi
+
+mkdir -p /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi \
+         /tmp/nginx-uwsgi /tmp/nginx-scgi /var/lib/php/session
+
+SITE_DIR="${OPENEMR_WEB_ROOT}/sites/${OPENEMR_SITE}"
+
+# Restore anything the PVC mount is hiding. Source lives outside the web root,
+# so it survives a mount at sites/ OR sites/default/.
+if [ -d "${OPENEMR_DEFAULTS}" ]; then
+    mkdir -p "${SITE_DIR}"
+    echo "Restoring default site files into ${SITE_DIR}..."
+    cp -an "${OPENEMR_DEFAULTS}/." "${SITE_DIR}/" 2>/dev/null || true
+else
+    echo "FATAL: ${OPENEMR_DEFAULTS} missing — image built incorrectly." >&2
+    exit 1
+fi
+
+mkdir -p "${SITE_DIR}/documents/logs_and_misc/methods"
+chmod -R g=u "${OPENEMR_WEB_ROOT}/sites" 2>/dev/null || true
 chmod -R g=u /var/lib/php/session 2>/dev/null || true
 
-# Create crypto keys directory (may be on mounted PVC, so create at runtime)
-mkdir -p ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc/methods 2>/dev/null || true
-chmod -R 770 ${OPENEMR_WEB_ROOT}/sites/default/documents/logs_and_misc 2>/dev/null || true
-
-# Restore default site files that are hidden by the PVC mount.
-# The PVC at sites/default/ starts empty, so files like config.php that
-# shipped with the image are invisible.  Copy them from the backup.
-if [ -d "${OPENEMR_WEB_ROOT}/sites/default.dist" ]; then
-    echo "Checking for missing default site files..."
-    cd ${OPENEMR_WEB_ROOT}/sites/default.dist
-    for f in *; do
-        if [ ! -e "${OPENEMR_WEB_ROOT}/sites/default/$f" ]; then
-            cp -a "$f" "${OPENEMR_WEB_ROOT}/sites/default/$f" 2>/dev/null \
-                && echo "  Restored: $f"
-        fi
-    done
-    cd ${OPENEMR_WEB_ROOT}
-fi
-
-# Test Redis connectivity and fall back to file sessions if needed
-echo "Testing session storage..."
-if php -r "try { \$r = new Redis(); \$r->connect('redis', 6379, 2); echo 'OK'; } catch (Exception \$e) { echo 'FAIL'; exit(1); }" 2>/dev/null; then
-    echo "✓ Redis session storage available"
+# --- Session backend -------------------------------------------------------
+# Written as a fresh drop-in rather than sed-patching managed config, which
+# needs write access to /etc/php.d and dies under `set -e` without it.
+# Probes a real write: connect() alone proves nothing about persistence.
+if php -r "
+    \$r = new Redis();
+    \$r->connect('${REDIS_HOST}', ${REDIS_PORT}, 2);
+    ".'$p = getenv("REDIS_PASSWORD"); if ($p) { $r->auth($p); }
+    $r->set("__probe", "ok", 10);
+    exit($r->get("__probe") === "ok" ? 0 : 1);' 2>/dev/null; then
+    echo "✓ Redis sessions at ${REDIS_HOST}:${REDIS_PORT} (read/write verified)"
+    SAVE_HANDLER=redis
+    SAVE_PATH="tcp://${REDIS_HOST}:${REDIS_PORT}"
+    [ -n "${REDIS_PASSWORD:-}" ] && SAVE_PATH="${SAVE_PATH}?auth=${REDIS_PASSWORD}"
 else
-    echo "⚠ Redis unavailable, falling back to file-based sessions"
-    # Update PHP-FPM to use file sessions
-    sed -i 's|php_value\[session.save_handler\] = redis|php_value\[session.save_handler\] = files|' /etc/php-fpm.d/www.conf
-    sed -i 's|php_value\[session.save_path\].*|php_value\[session.save_path\] = "/var/lib/php/session"|' /etc/php-fpm.d/www.conf
-    # Also update the PHP ini so CLI scripts use file sessions too
-    sed -i 's|session.save_handler = redis|session.save_handler = files|' /etc/php.d/99-openemr.ini
-    sed -i 's|session.save_path = "tcp://redis:6379"|session.save_path = "/var/lib/php/session"|' /etc/php.d/99-openemr.ini
+    echo "⚠ Redis unusable — file-based sessions (single-pod only)"
+    SAVE_HANDLER=files
+    SAVE_PATH=/var/lib/php/session
 fi
 
-# Check if OpenEMR is already configured (look for $config = 1 in sqlconf.php)
-SQLCONF="${OPENEMR_WEB_ROOT}/sites/default/sqlconf.php"
+cat > /etc/php.d/98-session.ini <<EOF
+session.save_handler = ${SAVE_HANDLER}
+session.save_path = "${SAVE_PATH}"
+EOF
+
+cat > /etc/php.d/97-runtime.ini <<EOF
+opcache.validate_timestamps = ${OPCACHE_VALIDATE_TIMESTAMPS}
+opcache.revalidate_freq = 60
+EOF
+
+if [ "${OPENEMR_DEBUG}" = "1" ]; then
+    echo "⚠ OPENEMR_DEBUG=1 — errors render to the browser. Never in production."
+    printf 'display_errors = On\ndisplay_startup_errors = On\n' > /etc/php.d/96-debug.ini
+else
+    rm -f /etc/php.d/96-debug.ini
+fi
+
+# --- First-run configuration ----------------------------------------------
+SQLCONF="${SITE_DIR}/sqlconf.php"
 INSTALLER="${OPENEMR_WEB_ROOT}/contrib/util/installScripts/InstallerAuto.php"
 
-# Debug: Show what files exist
-echo "Checking configuration status..."
-echo "  - sqlconf.php exists: $(test -f "$SQLCONF" && echo 'yes' || echo 'no')"
-echo "  - InstallerAuto.php exists: $(test -f "$INSTALLER" && echo 'yes' || echo 'no')"
+# Hoisted above the branch: the schema check needs them on the already-
+# configured path too, not just the install path.
+export MYSQL_HOST="${MYSQL_HOST:-mariadb}"
+export MYSQL_PORT="${MYSQL_PORT:-3306}"
+export MYSQL_DATABASE="${MYSQL_DATABASE:-openemr}"
+export MYSQL_USER="${MYSQL_USER:-openemr}"
+OE_USER="${OE_USER:-admin}"
 
-# Check if already configured ($config = 1 means configured)
-ALREADY_CONFIGURED=false
 if [ -f "$SQLCONF" ] && grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
-    ALREADY_CONFIGURED=true
-    echo "  - Configuration status: CONFIGURED"
-else
-    echo "  - Configuration status: NOT CONFIGURED"
-fi
+    echo "sqlconf.php present — skipping install, checking schema version..."
 
-# Auto-configuration on first run
-if [ "$ALREADY_CONFIGURED" = false ] && [ -f "$INSTALLER" ]; then
-    echo "=========================================="
-    echo "Running OpenEMR Auto-Configuration"
-    echo "=========================================="
-    
-    # Set defaults if not provided
-    export MYSQL_HOST=${MYSQL_HOST:-mariadb}
-    export MYSQL_PORT=${MYSQL_PORT:-3306}
-    export MYSQL_DATABASE=${MYSQL_DATABASE:-openemr}
-    export MYSQL_USER=${MYSQL_USER:-openemr}
-    export MYSQL_PASS=${MYSQL_PASS:-openemr}
-    export OE_USER=${OE_USER:-admin}
-    export OE_PASS=${OE_PASS:-pass}
-    
-    echo "Database connection settings:"
-    echo "  - Host: ${MYSQL_HOST}"
-    echo "  - Port: ${MYSQL_PORT}"
-    echo "  - Database: ${MYSQL_DATABASE}"
-    echo "  - User: ${MYSQL_USER}"
-    echo "  - Admin User: ${OE_USER}"
-    
-    # Wait for database to be ready
-    echo "Waiting for database at ${MYSQL_HOST}..."
-    counter=0
-    while ! php -r "mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}') or exit(1);" 2>/dev/null; do
-        sleep 2
-        counter=$((counter+1))
-        echo "  Attempt $counter: waiting for database..."
-        if [ $counter -gt 30 ]; then
-            echo "ERROR: Database not ready after 60 seconds"
-            echo "Check that MariaDB pod is running and credentials are correct"
-            echo "Falling back to manual setup..."
+    # A configured site is not the same thing as a current one. The PVC mounted
+    # at sites/default outlives the image, so an 8.4.0 container can boot onto a
+    # schema written by 8.0.0. OpenEMR does not self-heal that gap — it runs the
+    # new code against the old tables, and the browser gets a blank page. Refuse
+    # instead, because a clear failure beats an EMR that silently half-works.
+    set +e
+    SCHEMA_INFO=$(php /usr/local/bin/oe-schema-check.php 2>&1)
+    SCHEMA_RC=$?
+    set -e
+    echo "  ${SCHEMA_INFO}"
+
+    case "$SCHEMA_RC" in
+        0)
+            echo "✓ Schema matches the image"
+            ;;
+        1)
+            echo "FATAL: the database schema was written by a different release." >&2
+            echo "" >&2
+            echo "  Lab or demo — discard the old data:" >&2
+            echo "    ./deploy-openemr.sh --cleanup && ./deploy-openemr.sh" >&2
+            echo "" >&2
+            echo "  Real data — upgrade the schema before serving traffic:" >&2
+            echo "    set OPENEMR_SKIP_SCHEMA_CHECK=1, then visit /sql_upgrade.php" >&2
+            echo "" >&2
+            [ "${OPENEMR_SKIP_SCHEMA_CHECK:-0}" = "1" ] || exit 1
+            echo "⚠ OPENEMR_SKIP_SCHEMA_CHECK=1 — starting anyway" >&2
+            ;;
+        *)
+            echo "⚠ Could not verify the schema version — starting anyway"
+            ;;
+    esac
+else
+    : "${MYSQL_PASS:?MYSQL_PASS must be set (use a Secret)}"
+    : "${OE_PASS:?OE_PASS must be set (use a Secret)}"
+
+    echo "Waiting for database at ${MYSQL_HOST}:${MYSQL_PORT}..."
+    for i in $(seq 1 30); do
+        if php -r "mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', ${MYSQL_PORT}) or exit(1);" 2>/dev/null; then
+            echo "✓ Database reachable"
             break
         fi
+        [ "$i" = 30 ] && { echo "FATAL: database unreachable after 60s" >&2; exit 1; }
+        sleep 2
     done
-    
-    if [ $counter -le 30 ]; then
-        echo "✓ Database connection successful"
-        
-        # Run InstallerAuto.php with no_root_db_access mode
-        # This uses the pre-created database and user from MariaDB container
-        echo "Running InstallerAuto.php (no_root_db_access mode)..."
-        cd ${OPENEMR_WEB_ROOT}
-        
-        # Enable the installer script
-        export OPENEMR_ENABLE_INSTALLER_AUTO=1
-        
-        php -f contrib/util/installScripts/InstallerAuto.php \
-            no_root_db_access=1 \
-            server="${MYSQL_HOST}" \
-            port="${MYSQL_PORT}" \
-            login="${MYSQL_USER}" \
-            pass="${MYSQL_PASS}" \
-            dbname="${MYSQL_DATABASE}" \
-            iuser="${OE_USER}" \
-            iuserpass="${OE_PASS}" \
-            iuname="Administrator" \
-            2>&1 \
-            && echo "✓ Auto-configuration completed successfully!" \
-            || echo "⚠ Auto-configuration had issues, check logs above"
-        
-        # Verify configuration was successful
-        if grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
-            echo "✓ OpenEMR configured and ready!"
-        else
-            echo "⚠ Configuration may not be complete - manual setup may be required"
-        fi
-        
-        echo "=========================================="
+
+    echo "Running InstallerAuto.php..."
+    cd "${OPENEMR_WEB_ROOT}"
+    export OPENEMR_ENABLE_INSTALLER_AUTO=1
+    php -f "$INSTALLER" \
+        no_root_db_access=1 \
+        server="${MYSQL_HOST}" port="${MYSQL_PORT}" \
+        login="${MYSQL_USER}" pass="${MYSQL_PASS}" \
+        dbname="${MYSQL_DATABASE}" \
+        iuser="${OE_USER}" iuserpass="${OE_PASS}" \
+        iuname="Administrator" 2>&1 || true
+
+    if ! grep -q '\$config = 1' "$SQLCONF" 2>/dev/null; then
+        echo "FATAL: configuration did not complete — $SQLCONF has no \$config = 1" >&2
+        exit 1
     fi
-elif [ "$ALREADY_CONFIGURED" = true ]; then
-    echo "✓ OpenEMR already configured, skipping auto-configuration"
-else
-    echo "⚠ InstallerAuto.php not found - manual setup required"
-    echo "  Visit the web interface to complete setup"
+
+    # A written sqlconf.php is not proof of a loaded schema. 8.4.0 itself
+    # added "fail loudly when the database upgrade fails" for this reason.
+    TABLES=$(php -r "
+        \$c = mysqli_connect('${MYSQL_HOST}', '${MYSQL_USER}', '${MYSQL_PASS}', '${MYSQL_DATABASE}', ${MYSQL_PORT});
+        \$r = mysqli_query(\$c, \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}'\");
+        echo mysqli_fetch_row(\$r)[0];
+    " 2>/dev/null || echo 0)
+    echo "Schema table count: ${TABLES}"
+    if [ "${TABLES}" -lt 100 ]; then
+        echo "FATAL: schema load incomplete (${TABLES} tables, expected several hundred)." >&2
+        echo "       Wipe the mariadb-data PVC and redeploy." >&2
+        exit 1
+    fi
+    echo "✓ Configured"
 fi
 
-# Start supervisor (manages nginx + PHP-FPM)
-echo "Starting services via supervisord..."
 exec /usr/bin/supervisord -c /etc/supervisord.conf
 ENTRYPOINT
 
-RUN chmod +x /entrypoint.sh && chgrp 0 /entrypoint.sh && chmod g=u /entrypoint.sh
-
 # ============================================================================
-# Health Checks and Metadata
+# Permissions — arbitrary UID, GID 0
 # ============================================================================
+RUN mkdir -p /var/log/nginx /var/lib/nginx /var/lib/php/session /run/php-fpm \
+    && chmod +x /entrypoint.sh \
+    && chgrp -R 0 \
+        ${OPENEMR_WEB_ROOT} ${OPENEMR_DEFAULTS} /opt/cqm-service \
+        /usr/local/bin/oe-schema-check.php \
+        /var/log/nginx /var/lib/nginx /var/lib/php /run \
+        /etc/nginx /etc/php.d /etc/php-fpm.d /entrypoint.sh \
+    && chmod -R g=u \
+        ${OPENEMR_WEB_ROOT} ${OPENEMR_DEFAULTS} /opt/cqm-service \
+        /usr/local/bin/oe-schema-check.php \
+        /var/log/nginx /var/lib/nginx /var/lib/php /run \
+        /etc/nginx /etc/php.d /etc/php-fpm.d /entrypoint.sh \
+    && chmod g=u /etc/passwd
 
-# Expose nginx port (8080 for non-root)
 EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# Switch to non-root user (OpenShift will override with arbitrary UID)
 USER 1001
-
-# Working directory
 WORKDIR ${OPENEMR_WEB_ROOT}
-
-# Start supervisor via entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
