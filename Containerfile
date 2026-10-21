@@ -1,5 +1,8 @@
 # OpenEMR Container — CentOS Stream 10 + Remi PHP 8.5
 # nginx + PHP-FPM + CQM under supervisord, OpenShift arbitrary-UID safe
+#
+# Security: requires PHP >= 8.5.12 (PHP2Shell, CVE-2026-109618 / CVE-2026-109619).
+# The runtime stage fails the build if Remi serves an older PHP.
 
 # ============================================================================
 # Stage 1: Builder
@@ -7,6 +10,9 @@
 FROM quay.io/centos/centos:stream10 AS builder
 
 ARG OPENEMR_VERSION=8.4.0
+
+# Make dnf tolerant of overloaded mirrors (EPEL/Remi under heavy load).
+RUN printf 'retries=10\ntimeout=60\nmax_parallel_downloads=3\n' >> /etc/dnf/dnf.conf
 
 RUN dnf config-manager --set-enabled crb \
     && dnf install -y \
@@ -97,6 +103,9 @@ ENV OPENEMR_VERSION=${OPENEMR_VERSION} \
     OPCACHE_VALIDATE_TIMESTAMPS=1 \
     OPENEMR_DEBUG=0
 
+# Make dnf tolerant of overloaded mirrors (EPEL/Remi under heavy load).
+RUN printf 'retries=10\ntimeout=60\nmax_parallel_downloads=3\n' >> /etc/dnf/dnf.conf
+
 RUN dnf config-manager --set-enabled crb \
     && dnf install -y \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm \
@@ -114,6 +123,14 @@ RUN dnf config-manager --set-enabled crb \
         php-pecl-redis5 \
         supervisor \
     && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* /tmp/dnf*
+
+# Security guard: refuse to ship PHP without the PHP2Shell fixes
+# (CVE-2026-109618 / CVE-2026-109619, fixed in 8.5.12). If this fails, Remi
+# hasn't published the patched build for this architecture yet -- a loud
+# failure here beats a quietly merged multi-arch manifest with old PHP in it.
+RUN php -r 'exit(version_compare(PHP_VERSION, "8.5.12", "<") ? 1 : 0);' \
+    || { echo "PHP $(php -r 'echo PHP_VERSION;') is unpatched (needs >= 8.5.12), wait for Remi"; exit 1; } \
+    && echo "✓ PHP $(php -r 'echo PHP_VERSION;') includes PHP2Shell fixes"
 
 # Node is needed at runtime for the CQM service only.
 RUN rpm --import https://rpm.nodesource.com/gpgkey/ns-operations-public.key \
