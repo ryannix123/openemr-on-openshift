@@ -10,9 +10,17 @@
 #
 # Usage:
 #   - Manual: Actions → Build and Push OpenEMR → Run workflow
-#   - Scheduled: Runs daily at 6am UTC, builds only if a new upstream release
-#     is detected (compares latest OpenEMR tag against Quay registry)
+#       gh workflow run "Build and Push OpenEMR" -R ryannix123/openemr-on-openshift
+#     Always builds, with no layer cache by default, so every OS and PHP
+#     package is fetched fresh. This is the button for "a CVE just dropped".
+#   - Daily (6am UTC): builds only if a new upstream OpenEMR release exists
+#   - Weekly (Mondays): ALWAYS rebuilds without cache, even if OpenEMR hasn't
+#     changed. The image's attack surface is mostly PHP, nginx and the CentOS
+#     base -- none of which bump the OpenEMR version when they ship a fix.
 #   - On push: Always builds when Containerfile or workflow changes on main
+#
+# Tags: <version>, <version>-<YYYYMMDD>, latest. The dated tag is immutable,
+# so a security rebuild never destroys the previous image you might roll back to.
 #
 # Architecture:
 #   Each architecture builds on its own native runner and pushes by digest,
@@ -31,9 +39,15 @@ on:
         description: 'OpenEMR version to build (e.g., 8.4.0). Leave empty to auto-detect latest.'
         required: false
         default: ''
+      fresh:
+        description: 'Ignore the build cache and fetch every package fresh (leave on for security rebuilds)'
+        type: boolean
+        required: false
+        default: true
 
   schedule:
-    - cron: '0 6 * * *'  # Daily at 6am UTC
+    - cron: '0 6 * * *'    # Daily at 6am UTC: build only on a new OpenEMR release
+    - cron: '30 7 * * 1'   # Weekly, Monday 7:30 UTC: forced fresh rebuild for OS/PHP fixes
 
   push:
     branches: [main]
@@ -54,6 +68,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.version_check.outputs.skip }}
+      no_cache: ${{ steps.version_check.outputs.no_cache }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -102,19 +117,47 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "### 📦 Build Version: ${VERSION} (Containerfile fallback)" >> $GITHUB_STEP_SUMMARY
 
-      # Scheduled runs skip when the tag is already published. Manual triggers
-      # and pushes always build.
-      - name: Check if version already exists in registry
+      # Decide whether to build, and whether to bypass the layer cache.
+      #
+      # The cache matters for security: the dnf layers only rebuild when the
+      # lines above them change, so a cached build happily reuses last month's
+      # PHP even after Remi ships a fix. Any rebuild that exists to pick up
+      # package updates must run with no-cache.
+      - name: Decide whether to build
         id: version_check
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           EVENT="${{ github.event_name }}"
+          SCHEDULE="${{ github.event.schedule }}"
 
-          if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "push" ]; then
-            echo "🔨 Event '${EVENT}' — always building"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            FRESH="${{ inputs.fresh }}"
+            echo "🔨 Manual run — always building (fresh=${FRESH})"
             echo "skip=false" >> $GITHUB_OUTPUT
+            echo "no_cache=${FRESH}" >> $GITHUB_OUTPUT
+            echo "### 🔨 Manual build (fresh packages: ${FRESH})" >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
+
+          if [ "$EVENT" = "push" ]; then
+            # The Containerfile or workflow changed, which already invalidates
+            # the affected layers. Cache keeps these builds fast.
+            echo "🔨 Push — always building"
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "no_cache=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [ "$SCHEDULE" = "30 7 * * 1" ]; then
+            echo "🛡️  Weekly security refresh — rebuilding from scratch"
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "no_cache=true" >> $GITHUB_OUTPUT
+            echo "### 🛡️ Weekly security refresh (no cache)" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Daily schedule: only build for a new upstream release.
+          echo "no_cache=true" >> $GITHUB_OUTPUT
 
           TAG_EXISTS=$(curl -sf \
             "https://quay.io/api/v1/repository/${{ env.IMAGE_NAME }}/tag/?specificTag=${VERSION}" \
@@ -188,6 +231,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             OPENEMR_VERSION=${{ needs.prepare.outputs.version }}
+          # Always re-pull the CentOS base, and skip cached layers on security
+          # rebuilds so dnf actually fetches current packages.
+          pull: true
+          no-cache: ${{ needs.prepare.outputs.no_cache == 'true' }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           provenance: false
@@ -239,6 +286,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.version }}-{{date 'YYYYMMDD'}}
             type=raw,value=latest
 
       - name: Create manifest list and push
@@ -253,9 +301,23 @@ jobs:
           docker buildx imagetools inspect \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}
 
+      # Report what PHP actually shipped, from the published image. The
+      # Containerfile's guard already failed the build on an unpatched PHP;
+      # this line makes the answer visible without pulling anything.
+      - name: Report shipped PHP version
+        id: php
+        run: |
+          PHP_VER=$(docker run --rm --platform linux/amd64 --entrypoint php \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }} \
+            -r 'echo PHP_VERSION;')
+          echo "✓ Published image ships PHP ${PHP_VER}"
+          echo "version=${PHP_VER}" >> $GITHUB_OUTPUT
+
       - name: Build summary
         run: |
           echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**PHP:** ${{ steps.php.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Architectures:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
