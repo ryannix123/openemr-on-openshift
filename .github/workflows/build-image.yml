@@ -22,6 +22,12 @@
 # Tags: <version>, <version>-<YYYYMMDD>, latest. The dated tag is immutable,
 # so a security rebuild never destroys the previous image you might roll back to.
 #
+# Retention: every tag except `latest` carries quay.expires-after=QUAY_TAG_TTL,
+# so Quay holds only two weeks of builds. A version tag that is still current
+# is re-pushed weekly and never lapses; dated tags and retired versions expire.
+# Expired tags sit in Quay's time machine for 14 days before GC, so a mistake
+# is recoverable from the UI. Same scheme as worldmonitor-redhat.
+#
 # Architecture:
 #   Each architecture builds on its own native runner and pushes by digest,
 #   then a merge job joins the digests into one manifest list. Cross-building
@@ -58,6 +64,9 @@ on:
 env:
   REGISTRY: quay.io
   IMAGE_NAME: ryan_nix/openemr-openshift
+  # How long tags live on Quay. Read by Quay from the quay.expires-after
+  # annotation on the manifest list; `latest` is pushed without it.
+  QUAY_TAG_TTL: 14d
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════
@@ -287,14 +296,24 @@ jobs:
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=${{ needs.prepare.outputs.version }}-{{date 'YYYYMMDD'}}
-            type=raw,value=latest
 
-      - name: Create manifest list and push
+      # Two manifest lists over the same per-arch digests. The version and
+      # dated tags get an index carrying quay.expires-after; `latest` gets its
+      # own index without it, so it never expires. (Re-tagging one index would
+      # make both share the annotation, and `latest` would expire too.)
+      - name: Create manifest lists and push
         working-directory: /tmp/digests
         run: |
+          SOURCES=$(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
           docker buildx imagetools create \
+            --annotation "index:quay.expires-after=${QUAY_TAG_TTL}" \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+            $SOURCES
+
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            $SOURCES
 
       - name: Inspect the published manifest
         run: |
