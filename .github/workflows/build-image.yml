@@ -22,8 +22,8 @@
 # Tags: <version>, <version>-<YYYYMMDD>, latest. The dated tag is immutable,
 # so a security rebuild never destroys the previous image you might roll back to.
 #
-# Retention: every tag except `latest` carries quay.expires-after=QUAY_TAG_TTL,
-# so Quay holds only two weeks of builds. A version tag that is still current
+# Retention: every tag except `latest` points at a copy of the image labeled
+# quay.expires-after=QUAY_TAG_TTL, so Quay holds only two weeks of builds. A version tag that is still current
 # is re-pushed weekly and never lapses; dated tags and retired versions expire.
 # Expired tags sit in Quay's time machine for 14 days before GC, so a mistake
 # is recoverable from the UI. Same scheme as worldmonitor-redhat.
@@ -64,8 +64,9 @@ on:
 env:
   REGISTRY: quay.io
   IMAGE_NAME: ryan_nix/openemr-openshift
-  # How long tags live on Quay. Read by Quay from the quay.expires-after
-  # annotation on the manifest list; `latest` is pushed without it.
+  # How long tags live on Quay. Quay reads the quay.expires-after LABEL of the
+  # images a tag points at (annotations on manifest lists are ignored).
+  # `latest` points at unlabeled images and never expires.
   QUAY_TAG_TTL: 14d
 
 jobs:
@@ -263,6 +264,42 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # A copy of the image that differs only by the quay.expires-after label:
+      # same layers, new config, built in seconds. Quay expires a tag based on
+      # the labels of the image(s) it points at -- it ignores annotations on
+      # manifest lists -- so expiring tags point at this copy and `latest`
+      # points at the unlabeled original.
+      - name: Write expiring-copy Containerfile
+        run: |
+          mkdir -p "${{ runner.temp }}/expiring"
+          printf 'FROM %s@%s\nLABEL quay.expires-after=%s\n' \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" "${{ steps.build.outputs.digest }}" "${QUAY_TAG_TTL}" \
+            > "${{ runner.temp }}/expiring/Containerfile"
+
+      - name: Build and push expiring copy by digest
+        id: build_expiring
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ runner.temp }}/expiring
+          file: ${{ runner.temp }}/expiring/Containerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export expiring digest
+        run: |
+          mkdir -p /tmp/expiring-digests
+          digest="${{ steps.build_expiring.outputs.digest }}"
+          touch "/tmp/expiring-digests/${digest#sha256:}"
+
+      - name: Upload expiring digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: expiring-digests-${{ matrix.arch }}
+          path: /tmp/expiring-digests/*
+          if-no-files-found: error
+          retention-days: 1
+
   # ═══════════════════════════════════════════════════════════════════════════
   # Join the per-arch digests into one tagged manifest list
   # ═══════════════════════════════════════════════════════════════════════════
@@ -276,6 +313,13 @@ jobs:
         with:
           path: /tmp/digests
           pattern: digests-*
+          merge-multiple: true
+
+      - name: Download expiring digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/expiring-digests
+          pattern: expiring-digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -297,23 +341,20 @@ jobs:
             type=raw,value=${{ needs.prepare.outputs.version }}
             type=raw,value=${{ needs.prepare.outputs.version }}-{{date 'YYYYMMDD'}}
 
-      # Two manifest lists over the same per-arch digests. The version and
-      # dated tags get an index carrying quay.expires-after; `latest` gets its
-      # own index without it, so it never expires. (Re-tagging one index would
-      # make both share the annotation, and `latest` would expire too.)
+      # Two manifest lists. Quay takes a list's expiry from the labels of the
+      # images inside it, so the version and dated tags list the labeled
+      # copies and `latest` lists the unlabeled originals, which never expire.
       - name: Create manifest lists and push
-        working-directory: /tmp/digests
         run: |
-          SOURCES=$(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+          DEST=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          PLAIN=$(cd /tmp/digests && printf "${DEST}@sha256:%s " *)
+          EXPIRING=$(cd /tmp/expiring-digests && printf "${DEST}@sha256:%s " *)
 
           docker buildx imagetools create \
-            --annotation "index:quay.expires-after=${QUAY_TAG_TTL}" \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $SOURCES
+            $EXPIRING
 
-          docker buildx imagetools create \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            $SOURCES
+          docker buildx imagetools create -t ${DEST}:latest $PLAIN
 
       - name: Inspect the published manifest
         run: |
