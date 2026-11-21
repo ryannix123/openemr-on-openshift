@@ -1,7 +1,8 @@
 # OpenEMR Container — CentOS Stream 10 + Remi PHP 8.5
 # nginx + PHP-FPM + CQM under supervisord, OpenShift arbitrary-UID safe
 #
-# Security: requires PHP >= 8.5.12 (PHP2Shell, CVE-2026-109618 / CVE-2026-109619).
+# Security: requires PHP >= 8.5.13: PHP2Shell (CVE-2026-109618 / CVE-2026-109619) plus the
+# November 19, 2026 release: 7 critical fixes, incl. CVE-2026-129182 / CVE-2026-129481 (gaps in the PHP2Shell fix) and CVE-2026-129289 (PHP-FPM request smuggling).
 # The runtime stage fails the build if Remi serves an older PHP.
 
 # ============================================================================
@@ -125,11 +126,12 @@ RUN dnf config-manager --set-enabled crb \
     && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* /tmp/dnf*
 
 # Security guard: refuse to ship PHP without the PHP2Shell fixes
-# (CVE-2026-109618 / CVE-2026-109619, fixed in 8.5.12). If this fails, Remi
+# (CVE-2026-109618 / CVE-2026-109619) and the November 2026 follow-ups,
+# all fixed in 8.5.13. If this fails, Remi
 # hasn't published the patched build for this architecture yet -- a loud
 # failure here beats a quietly merged multi-arch manifest with old PHP in it.
-RUN php -r 'exit(version_compare(PHP_VERSION, "8.5.12", "<") ? 1 : 0);' \
-    || { echo "PHP $(php -r 'echo PHP_VERSION;') is unpatched (needs >= 8.5.12), wait for Remi"; exit 1; } \
+RUN php -r 'exit(version_compare(PHP_VERSION, "8.5.13", "<") ? 1 : 0);' \
+    || { echo "PHP $(php -r 'echo PHP_VERSION;') is unpatched (needs >= 8.5.13), wait for Remi"; exit 1; } \
     && echo "✓ PHP $(php -r 'echo PHP_VERSION;') includes PHP2Shell fixes"
 
 # Node is needed at runtime for the CQM service only.
